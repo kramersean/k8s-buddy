@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buddy-config
+  namespace: k8s-buddy
+  labels:
+    app: buddy-api
+data:
+  mode: "primary"
+  log_level: "info"

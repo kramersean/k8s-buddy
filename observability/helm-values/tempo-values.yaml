@@ -1,0 +1,45 @@
+tempo:
+  replicas: 1
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  config: |
+    multitenancy_enabled: false
+    compactor:
+      compaction:
+        block_retention: 48h
+    distributor:
+      receivers:
+        jaeger:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:14250
+            http:
+              endpoint: 0.0.0.0:14268
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+    ingester:
+      max_block_duration: 1h
+      trace_idle_period: 10m
+      CompleteBlockTimeout: 1h
+    query_frontend:
+      search:
+        duration_limit: 1h
+        enable_gateway: false
+      trace_by_service:
+        duration_limit: 1h
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces

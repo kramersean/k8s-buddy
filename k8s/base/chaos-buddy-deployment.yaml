@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-buddy
+  namespace: k8s-buddy
+  labels:
+    app: chaos-buddy
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chaos-buddy
+  template:
+    metadata:
+      labels:
+        app: chaos-buddy
+        version: v1
+    spec:
+      serviceAccountName: chaos-buddy
+      containers:
+      - name: chaos-buddy
+        image: chaos-buddy:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8082
+          name: http
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8082"
+        - name: CHAOS_ENABLED
+          value: "false"
+        - name: KILL_INTERVAL_SECONDS
+          value: "60"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"

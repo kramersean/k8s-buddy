@@ -1,0 +1,20 @@
+# Secrets and local overrides
+.env
+.env.local
+*.local
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+bin/
+dist/
+*.tar.gz

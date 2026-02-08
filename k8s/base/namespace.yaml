@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-buddy
+  labels:
+    name: k8s-buddy
+    managed-by: k8s-buddy

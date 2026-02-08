@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: buddy-api-pdb
+  namespace: k8s-buddy
+  labels:
+    app: buddy-api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: buddy-api
