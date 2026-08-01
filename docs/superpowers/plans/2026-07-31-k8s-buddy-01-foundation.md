@@ -19,7 +19,14 @@ Every task must honor these. Values are exact — copy them verbatim, never para
 - Go module path: `github.com/sean-kramer/k8s-buddy`
   *(Assumption — the user's GitHub org/username was not specified. Task 1 must
   provide a `make rename-module MODULE=...` target so this is a one-command change.)*
-- `go.mod` declares `go 1.25`. Installed toolchain is Go 1.26.5.
+- `go.mod` declares `go 1.25.0` and contains **no** `toolchain` directive.
+  Installed toolchain is Go 1.26.5.
+  *(Amended during Task 3. The original constraint said the literal `go 1.25`.
+  `prometheus/client_golang` and its transitive dependencies —
+  `golang.org/x/sys`, `prometheus/common`, `prometheus/procfs` — declare
+  `go 1.25.0` as their own minimum, so a bare `go 1.25` fails `go build`,
+  `vet`, and `test` under `-mod=readonly`. Verified empirically rather than
+  assumed. The patch-level form is required, not cosmetic.)*
 - Single Go module at the repository root. No nested modules.
 
 **Naming**
