@@ -552,8 +552,19 @@ jobs:
       - name: Create the k8s-buddy-plants namespace (PSA restricted)
         run: kubectl apply -k deploy/kustomize/plants
 
-      - name: Apply the fernie Plant sample
-        run: kubectl apply -f config/samples/plant-fernie.yaml
+      # `make apply-sample-plant` (not a bare `kubectl apply`) is the fix for
+      # the exact same webhook race Task 6 found and fixed in the Makefile's
+      # own `demo-operator`: the "Operator pod is Running and Ready" step
+      # above only proves the Pod itself is Ready, not that every node's
+      # kube-proxy has finished programming the webhook Service's
+      # ClusterIP -> pod-IP route, so a Plant apply run immediately
+      # afterwards can hit "dial tcp ...:443: connect: connection refused".
+      # The retry loop that fixes this lives in exactly one place (the
+      # Makefile target, see its own comment) so local dev and CI can never
+      # drift out of sync on it again -- this step calls that target rather
+      # than keeping a second, inline copy of the same loop.
+      - name: Apply the fernie Plant sample (retries until the webhook Service is routable)
+        run: make apply-sample-plant
 
       - name: Wait for the operator to report all replicas ready
         run: |
