@@ -34,6 +34,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -66,6 +67,7 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -98,6 +100,7 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -110,6 +113,20 @@ jobs:
         run: |
           echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      # Required for the linux/arm64 leg below: build/Dockerfile.buddy-api's
+      # builder stage (golang:1.26-alpine) has no --platform=$BUILDPLATFORM
+      # and no GOARCH=$TARGETARCH, so `go mod download`/`go build` in the
+      # arm64 leg actually EXECUTES arm64 binaries under emulation.
+      # GitHub-hosted runners register no binfmt handlers by default --
+      # without this step the arm64 leg dies with "exec format error" and
+      # takes the whole job (and, transitively, anything gated behind it)
+      # down with it. Cross-compiling the Dockerfile with GOARCH=$TARGETARCH
+      # instead of emulating would be faster and more robust, but that file
+      # belongs to Task 5 and is out of scope here -- see the report's
+      # follow-up note.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -150,17 +167,19 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # scan -- trivy over the filesystem (deps/config, always available) and
-  # over the built image. `needs: build` sequences this after the build job
-  # per the task brief, but the image trivy scans here is built fresh, locally,
-  # with --load: build's own image is push:false/unloaded on a PR, so there is
-  # nothing in build's job to pull, and pulling from ghcr would also require
-  # an image that a fork PR was never allowed to push. Building locally here
-  # sidesteps both problems for push and PR alike.
+  # over the built image. This job builds its own single-platform,
+  # push:false/load:true image rather than depending on `build`'s output:
+  # build's own image is push:false/unloaded on a PR (nothing to pull), and
+  # pulling from ghcr would also require an image a fork PR was never
+  # allowed to push. Because scan is fully self-sufficient, it deliberately
+  # has no `needs: build` -- a `needs` here would only serialize scan behind
+  # the slower multi-arch build and let a build failure suppress scanning
+  # entirely, without buying scan anything it actually depends on.
   # ---------------------------------------------------------------------------
   scan:
     name: scan
     runs-on: ubuntu-latest
-    needs: build
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -211,6 +230,7 @@ jobs:
   manifests:
     name: manifests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -224,13 +244,20 @@ jobs:
         run: |
           curl -sSL -o /tmp/kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
           kubeconform -v
 
+      # shell: bash (rather than the default `bash -e {0}`) is required so
+      # `set -o pipefail` is in effect: without it, a failure in `kubectl
+      # kustomize` would be masked by kubeconform's own exit code, and
+      # kubeconform on empty stdin reports "0 resources, 0 errors" and exits
+      # 0 -- a broken kustomization.yaml would silently PASS this job.
       - name: Validate deploy/kustomize/base (strict, real k8s schemas)
+        shell: bash
         run: |
+          set -euo pipefail
           kubectl kustomize deploy/kustomize/base | \
-            kubeconform -strict -summary -kubernetes-version 1.36.0 -
+            kubeconform -strict -summary -kubernetes-version 1.36.1 -
 
   # ---------------------------------------------------------------------------
   # e2e -- the important one. Stands up the same 3-node kind topology CI and
@@ -247,12 +274,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
 
       # Same node topology, same node image, as local dev
       # (deploy/kind/kind-config.yaml pins kindest/node:v1.36.1, 3 nodes).

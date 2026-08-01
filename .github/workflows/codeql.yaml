@@ -11,8 +11,11 @@ on:
   schedule:
     - cron: "17 3 * * 1" # every Monday at 03:17 UTC
 
+# github.event_name is included alongside github.ref: a scheduled run and a
+# push both target refs/heads/main, so keying on ref alone would let the
+# Monday cron and a same-day main push cancel each other out.
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  group: codeql-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -22,6 +25,7 @@ jobs:
   analyze:
     name: analyze (go)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
