@@ -84,13 +84,29 @@ while true; do
 	NOW=$(date +%s)
 	ELAPSED=$((NOW - START_TIME))
 
-	READY_COUNT="$(kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL" \
-		-o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' 2>/dev/null \
-		| grep -c '^true$' || true)"
-	TOTAL_COUNT="$(kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+	# Exclude $VICTIM by name from both counts. Immediately after
+	# `kubectl delete --wait=false`, the victim pod object still exists
+	# (Terminating) and can still report ready:true until its next 2s
+	# readiness probe catches up -- if it were counted, a poll that lands
+	# before the ReplicaSet has even created a replacement could see
+	# READY==3 && TOTAL==3 (the 2 survivors plus the not-yet-terminated
+	# victim) and declare success having observed zero chaos. Filtering
+	# the victim's own line out of every count means recovery can only be
+	# declared once a genuinely NEW pod (the replacement) exists and is
+	# Ready alongside the 2 surviving pods -- the victim's own transient
+	# ready:true can no longer contribute to hitting 3/3.
+	PODS_LINE="$(kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL" --no-headers 2>/dev/null | grep -v "^${VICTIM}[[:space:]]" || true)"
 
-	echo "[t=${ELAPSED}s] Ready: ${READY_COUNT}/${TOTAL_COUNT} (want ${EXPECTED_REPLICAS}/${EXPECTED_REPLICAS})"
-	kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL" --no-headers 2>/dev/null | sed 's/^/    /'
+	if [ -n "$PODS_LINE" ]; then
+		TOTAL_COUNT="$(echo "$PODS_LINE" | wc -l | tr -d ' ')"
+		READY_COUNT="$(echo "$PODS_LINE" | awk '{print $2}' | grep -c '^1/1$' || true)"
+	else
+		TOTAL_COUNT=0
+		READY_COUNT=0
+	fi
+
+	echo "[t=${ELAPSED}s] Ready (excluding deleted pod ${VICTIM}): ${READY_COUNT}/${TOTAL_COUNT} (want ${EXPECTED_REPLICAS}/${EXPECTED_REPLICAS})"
+	kubectl -n "$NAMESPACE" get pods -l "$APP_LABEL" --no-headers 2>/dev/null | sed 's/^/    /' || true
 
 	if [ "$READY_COUNT" -eq "$EXPECTED_REPLICAS" ] && [ "$TOTAL_COUNT" -eq "$EXPECTED_REPLICAS" ]; then
 		RECOVERED=1

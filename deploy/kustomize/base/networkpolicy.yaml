@@ -24,6 +24,26 @@
 #      Task 6 report for how the DNS and NodePort checks were done), so an
 #      unqualified `ingress: - ports: [...]` with no `from` is a real,
 #      necessary hole, not a no-op label.
+#
+#      Two tighter alternatives were considered and rejected:
+#        - `externalTrafficPolicy: Local` on the NodePort Service would
+#          preserve the client source IP (letting a `from` selector work),
+#          but it's actively wrong for this cluster: the 30080
+#          extraPortMapping in deploy/kind/kind-config.yaml lands on the
+#          control-plane node, which is NoSchedule-tainted and never runs
+#          a buddy-api pod, so `Local` would have no local endpoint to
+#          route to and would drop the traffic outright.
+#        - An `ipBlock` on the node/pod CIDR is tighter than "any source"
+#          but hardcodes a docker-assigned subnet -- this machine's kind
+#          network happens to be 172.20.0.0/16, but kind commonly assigns
+#          172.18.0.0/16 (or others) on a clean install. Hardcoding it
+#          would reintroduce the exact "works here, fails on a clean
+#          machine" failure mode the kind-load `:dev`-tag fix in this same
+#          task was written to eliminate.
+#      The rule below keeps the blast radius small on the axes that
+#      matter: it selects only buddy-api pods, opens only TCP/8080, and
+#      egress from those pods remains fully default-deny except for the
+#      DNS hole above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

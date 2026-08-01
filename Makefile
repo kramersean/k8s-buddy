@@ -147,6 +147,15 @@ status: ## Show buddy-api pods/services/PDB and rollout status in the k8s-buddy 
 logs: ## Tail logs from every buddy-api pod in the k8s-buddy namespace
 	kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 -f
 
+# `demo`'s prerequisites (kind-up, docker-build, kind-load, deploy) are a
+# strict sequential pipeline -- kind-load needs docker-build's image, deploy
+# needs kind-load to have already loaded it into the cluster -- so `make -j
+# demo` would race them against each other. `.NOTPARALLEL:` with no target
+# list disables parallelism for the whole file, which is the only form
+# GNU Make 3.81 understands (the target-scoped form is a later GNU Make
+# extension); nothing else in this Makefile benefits from -j anyway.
+.NOTPARALLEL:
+
 .PHONY: demo
 demo: kind-up docker-build kind-load deploy ## Full self-healing demo: kind-up -> docker-build -> kind-load -> deploy -> wait for rollout -> hack/demo.sh
 	kubectl -n k8s-buddy rollout status deployment/buddy-api --timeout=120s
