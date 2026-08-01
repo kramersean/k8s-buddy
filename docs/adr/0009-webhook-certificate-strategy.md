@@ -55,66 +55,138 @@ new CA, a brand new serving certificate, and a fresh `caBundle` patch onto
 both webhook configurations, every single time. Nothing about the previous
 certificate is ever reused or trusted again.
 
-This is deliberate, not an oversight bought back with a TODO:
+This is deliberate, not an oversight bought back with a TODO -- but two
+mistakes in the first version of this design are worth recording here rather
+than quietly fixing, since they were genuine bugs, not just wording:
 
-- **Nothing in this project needs the certificate to outlive its process.**
-  The only client that ever needs to trust it is the API server's own
-  webhook dispatcher, which reads `caBundle` fresh off the
-  `{Mutating,Validating}WebhookConfiguration` object on every call -- not
-  once, cached, at controller startup. Regenerating both together, in the
-  same startup sequence, keeps them trivially consistent: there is no
-  version-skew window where a new Pod serves a new certificate that an old,
-  un-patched `caBundle` doesn't yet trust (or vice versa), because the same
-  process that starts serving the new certificate is also the one that just
-  patched the `caBundle` naming it, moments before.
-- **The certificate never needs rotation logic.** It is
-  `webhookCertificateValidity` (24h) from the moment the process starts, well
-  past comfortable for a container that gets rescheduled far more often than
-  that on a dev cluster -- and if a pod genuinely lived 24h uninterrupted,
-  the fix is the same one a crash already exercises: the container restarts
-  (or is restarted) and mints a new one. There is no rotation code to get
-  wrong because there is no rotation; there is only "regenerate at startup,"
-  the same operation whether triggered by a crash, a rollout, or (in
-  principle) an expiring cert.
-- **A stale `caBundle` cannot silently linger.** With a Secret-backed
-  cert-manager certificate, an operator that failed to restart for months
-  could still be serving a certificate nobody re-validated recently. Here,
-  every restart is a hard reset: old cert discarded, old trust relationship
-  discarded, both replaced atomically as one of the very first things
-  `main()` does.
+- **A short validity window was tried first, and was wrong.** The original
+  version of this ADR set `webhookCertificateValidity` to 24h, reasoning that
+  since the cert is regenerated every restart anyway, a long validity
+  "buys nothing." That reasoning missed the actual failure mode: nothing in
+  this process *proactively* regenerates the certificate before it expires
+  -- regeneration only happens at the top of `main()`. A Pod that simply
+  stays up past 24h (a kind demo cluster left running over a weekend is the
+  concrete case, not a hypothetical one) serves an **expired** leaf
+  certificate. The API server's TLS verification then fails, and with the
+  validating webhook's `failurePolicy: Fail`, every Plant `CREATE`/`UPDATE`
+  starts failing -- with no restart, no log line from this process (it isn't
+  the one rejecting the request), and no automatic recovery, until someone
+  happens to notice and manually bounces the Pod. `webhookCertificateValidity`
+  is now 10 years (`87600 * time.Hour`), which turns that scenario from a
+  timer-driven certainty into something that should never realistically
+  happen during this project's lifetime -- and `webhookCertExpiryCheck`
+  (registered on both `/healthz` and `/readyz`) is the backstop for even
+  that: it reports this process unhealthy once the leaf is within
+  `webhookCertExpiryReadinessMargin` (24h) of its actual `NotAfter`, so a
+  failing liveness probe restarts the container (minting a fresh
+  certificate) well before the old one could ever actually expire in use.
+- **An overwrite-based `caBundle` patch was tried first, and was wrong.**
+  The original version of this ADR also claimed "there is no version-skew
+  window where a new Pod serves a new certificate that an old, un-patched
+  `caBundle` doesn't yet trust" -- true only for a single Pod restarting in
+  isolation, and false for a rolling update: the new Pod's certificate
+  bootstrap patches its own, brand-new CA into `caBundle` **before** it is
+  marked Ready, while the OLD Pod is still the Deployment's only Service
+  endpoint and is still presenting its OLD leaf certificate. Overwriting the
+  `caBundle` at that moment means the API server stops trusting the still-
+  serving old Pod's certificate immediately -- every Plant write fails x509
+  verification for the entire readiness-transition window, self-inflicted by
+  the very rollout meant to fix or improve something. `mergeCABundle`
+  (`cmd/plant-operator/webhookcerts.go`) fixes this by **appending**: every
+  still-valid CA already in the bundle is kept, the new one is added, and
+  only already-expired entries are pruned. See "Certificate lifetime,
+  rollout overlap, and multiple replicas" below for the full mechanics and
+  what this incidentally also fixes for `replicaCount > 1`.
+- **A stale `caBundle` cannot silently linger indefinitely.** With a
+  Secret-backed cert-manager certificate, an operator that failed to restart
+  for months could still be serving a certificate nobody re-validated
+  recently. Here, the bundle only ever accumulates entries from Pods that
+  have actually run and patched their own CA in -- there is no
+  independently-issued, never-verified certificate sitting untouched for
+  months, because there is no path to a `caBundle` entry that didn't come
+  from a process that, at the time, was itself up and serving.
 
-The cost is symmetrical: a webhook server that is down for any reason is
-*also* not a webhook server anyone could dial with a still-valid, still-
-trusted certificate to fall back on -- there is no cached trust to lean on
-during an outage, which is fine, because a downed operator has nothing
-useful to validate against anyway (see the failure-mode discussion below).
+The cost: a webhook server that is down for any reason is not a webhook
+server anyone could dial with a still-valid, still-trusted certificate to
+fall back on for THAT Pod specifically -- but with `mergeCABundle` in place,
+that cost is scoped to the one Pod that's actually down, not to the whole
+`caBundle`: any other still-running replica's own CA remains trusted, and a
+down operator has nothing useful to validate against anyway (see the
+failure-mode discussion below).
 
 ## Decision
 
 `cmd/plant-operator/webhookcerts.go`:
 
 - **`generateWebhookServingCertificate`** creates a fresh ECDSA P-256 CA
-  (self-signed, `IsCA: true`) and a leaf serving certificate it signs,
-  carrying every DNS name the webhook Service could be dialed by
-  (`webhookServiceDNSNames`: bare, namespaced, `.svc`, and
-  `.svc.cluster.local` forms) plus `127.0.0.1` for local debugging. It
-  writes `tls.crt`/`tls.key` to `--webhook-cert-dir` (default
-  `/tmp/k8s-webhook-server/serving-certs`, controller-runtime's own
-  `webhook.Server` convention) and returns the CA's own PEM bytes.
+  (self-signed, `IsCA: true`, valid `webhookCertificateValidity` -- 10 years)
+  and a leaf serving certificate it signs, carrying every DNS name the
+  webhook Service could be dialed by (`webhookServiceDNSNames`: bare,
+  namespaced, `.svc`, and `.svc.cluster.local` forms) plus `127.0.0.1` for
+  local debugging. It writes `tls.crt`/`tls.key` to `--webhook-cert-dir`
+  (default `/tmp/k8s-webhook-server/serving-certs`, controller-runtime's own
+  `webhook.Server` convention) and returns both the CA's own PEM bytes and
+  the leaf's `NotAfter`, the latter feeding `webhookCertExpiryCheck`.
 - **`patchWebhookCABundles`** builds a direct (uncached) client from the
   operator's own in-cluster config, `Get`s the two webhook configurations by
-  name, sets every entry's `clientConfig.caBundle` to those PEM bytes, and
-  `Update`s them -- retrying with a bounded exponential backoff (up to
-  ~30s total) so a `kubectl apply -k deploy/kustomize/operator` that applies
-  the RBAC/webhook manifests and the Deployment in one pass, with no
-  ordering guarantee between them, does not race a not-yet-created
-  `ValidatingWebhookConfiguration`.
+  name, **merges** (via `mergeCABundle` -- appends, dedupes, prunes expired
+  entries; never overwrites) the new CA's PEM bytes into every entry's
+  `clientConfig.caBundle`, and `Update`s them -- retrying with a bounded
+  exponential backoff (up to ~30s total) so a `kubectl apply -k
+  deploy/kustomize/operator` that applies the RBAC/webhook manifests and the
+  Deployment in one pass, with no ordering guarantee between them, does not
+  race a not-yet-created `ValidatingWebhookConfiguration`.
 - `cmd/plant-operator/main.go` calls both, in that order, **before**
   constructing the `ctrl.Manager` (and therefore before its webhook server
   binds `--webhook-port`, default 9443) -- a request can never reach a
   webhook server whose own certificate isn't already on disk, and the
-  `caBundle` naming that certificate's CA is patched in before the server
+  `caBundle` merge naming that certificate's CA lands before the server
   starts listening for it.
+- **`webhookCertExpiryCheck`** is registered on both `mgr.AddHealthzCheck`
+  and `mgr.AddReadyzCheck` under the name `webhook-cert-expiry`, alongside
+  the existing `healthz.Ping` checks. It reports unhealthy once the leaf
+  certificate is within `webhookCertExpiryReadinessMargin` (24h) of its
+  actual expiry -- registered on `/healthz` specifically so a failing
+  liveness probe actually restarts the container (the only thing that mints
+  a fresh certificate), and on `/readyz` too so the Pod is pulled out of the
+  webhook Service's endpoints as early as possible, before the liveness
+  probe's own `failureThreshold * periodSeconds` finally triggers the
+  restart.
+
+### Certificate lifetime, rollout overlap, and multiple replicas
+
+`mergeCABundle` is what makes both a rolling update and running more than
+one replica safe -- neither of which a plain overwrite (the version this
+design shipped with first) would have been:
+
+- **Rolling update.** The webhook server is not gated by leader election, so
+  as soon as a new Pod's container starts, its certificate bootstrap runs
+  and merges its own brand-new CA into both `caBundle`s -- before that Pod
+  is Ready, while the OLD Pod is still the Deployment's only Service
+  endpoint and is still presenting its OLD leaf certificate. Because
+  `mergeCABundle` appends rather than overwrites, the old CA stays in the
+  bundle throughout the overlap: the still-serving old Pod remains trusted
+  right up until it actually stops serving, and the new Pod's own CA is
+  already trusted the moment traffic starts reaching it. There is no window
+  where the currently-serving Pod's certificate is untrusted.
+- **Multiple replicas.** `charts/k8s-buddy/values.schema.json`'s
+  `replicaCount` allows up to 5, and every replica independently generates
+  and trusts only its own CA (there is no shared identity or shared Secret).
+  With an overwrite, only the last replica to patch would ever end up
+  trusted, and the API server's Service-level load balancing has no
+  affinity to route around that -- roughly `(n-1)/n` of admission calls
+  would fail TLS verification depending on which replica happened to answer.
+  With `mergeCABundle`, the bundle accumulates every currently-running
+  replica's CA, so any of them can be dialed successfully. `replicaCount > 1`
+  is therefore genuinely safe for the webhook server too, not merely
+  tolerated -- see `values.schema.json`'s own updated description.
+- **Bundle growth is bounded by pruning, not by count.** Certificates are
+  never proactively evicted except by expiring; with `webhookCertificateValidity`
+  at 10 years, the bundle accumulates one entry per Pod that has ever
+  patched it in, for up to 10 years. For this project's actual scale (a
+  demo-grade operator restarted a handful of times, not a production fleet
+  restarting thousands of times a day) that is a bounded, acceptable amount
+  of growth, not an unbounded leak.
 
 ### RBAC: a real, narrowly-scoped privilege increase
 
@@ -252,13 +324,23 @@ never goes down:**
 - No cert-manager dependency, no manual certificate step, and no CRD beyond
   `Plant` itself -- `make demo-operator` reaches a fully working webhook
   install in the same one command it always has.
-- The certificate is regenerated, and both `caBundle`s re-patched, on every
-  single restart of `plant-operator` -- verified live: redeploying the
-  operator with `make deploy-operator` produces a new CA each time
-  (`kubectl get {mutating,validating}webhookconfiguration ... -o
-  jsonpath='{.webhooks[0].clientConfig.caBundle}'` differs across restarts),
-  and both configurations' `caBundle` are populated and non-empty within
-  seconds of the Pod reporting Ready.
+- The certificate is regenerated, and both `caBundle`s re-merged (not
+  overwritten), on every single restart of `plant-operator` -- verified
+  live: redeploying the operator with `make deploy-operator` grows the
+  `caBundle` by the new CA (`kubectl get
+  {mutating,validating}webhookconfiguration ... -o
+  jsonpath='{.webhooks[0].clientConfig.caBundle}'` is longer after a
+  redeploy, and decodes to more than one `CERTIFICATE` PEM block once a
+  second generation has been merged in), and both configurations' `caBundle`
+  are populated and non-empty within seconds of the Pod reporting Ready.
+- `webhookCertificateValidity` is 10 years, not the original 24h -- an
+  operator Pod can now stay up indefinitely on this project's timescale
+  without its own certificate expiring out from under it.
+  `webhookCertExpiryCheck` is the backstop should that ever change (a
+  shorter validity introduced later, a clock badly skewed): both
+  `/healthz` and `/readyz` fail once the leaf is within 24h of its actual
+  expiry, so the kubelet restarts the container and a fresh certificate is
+  minted before the old one could ever actually be served expired.
 - `config/rbac/role.yaml` (and `charts/k8s-buddy/templates/clusterrole.yaml`)
   carry one new rule neither had before Task 4:
   `admissionregistration.k8s.io` `get`/`update`/`patch` on
@@ -279,13 +361,17 @@ never goes down:**
   unable to *write* one -- and that condition self-heals the moment the
   operator is healthy again, with no manual recovery step required in the
   ordinary case.
-- If this project ever needs a certificate to survive a restart (multiple
-  operator replicas needing to agree on one certificate rather than each
-  minting its own, for instance, which would currently work -- each
-  replica's webhook server presents its own independently-trusted
-  certificate, and the API server accepts whichever `caBundle` was patched
-  in most recently by whichever replica's `patchWebhookCABundles` ran last,
-  which is fine today because only one replica exists in the Deployment's
-  own `replicas: 1` -- but would become a real footgun with `replicas: 2+`
-  redeploying independently), that is the point at which this ADR is
-  superseded in favor of cert-manager or a shared Secret, not amended.
+- `replicaCount > 1` (both the kustomize path, which pins `replicas: 1`
+  deliberately but could be scaled by hand, and `charts/k8s-buddy`, whose
+  schema allows up to 5) is genuinely safe for the webhook server now that
+  `mergeCABundle` appends rather than overwrites -- each replica's
+  independently-minted CA accumulates in both `caBundle`s rather than the
+  last writer silently evicting every other replica's trust. This was NOT
+  true of this ADR's first version (a plain overwrite), which is why the
+  `values.schema.json` description for `replicaCount` now explains why
+  `>1` works, not merely that it's "safe, not useful."
+- If this project ever needs a certificate to survive a restart FOR A REASON
+  OTHER than the ones already covered here (an external system independently
+  verifying this specific CA's identity across restarts, for instance, which
+  nothing in this project currently does), that is the point at which this
+  ADR is superseded in favor of cert-manager or a shared Secret, not amended.
