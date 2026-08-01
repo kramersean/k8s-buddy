@@ -2,10 +2,15 @@
 
 ## Status
 
-Accepted. Amended by Plan 3 Task 2: the ServiceMonitor deferral (#2) is
-**closed** — it is delivered below. The HPA omission (#1) is **not** closed;
-it is upgraded from a deferral to a **permanent decision**, for the reason
-given in its own section.
+Accepted. Amended twice since:
+
+- Plan 3 Task 2: the ServiceMonitor deferral (#2) is **closed** — it is
+  delivered below. The HPA omission (#1) is **not** closed; it is upgraded
+  from a deferral to a **permanent decision**, for the reason given in its
+  own section.
+- 2026-08-01, commit `433f5b7`: the `PlantSpec.chaos` drop (#3) is
+  **REVERSED** — the field is back, narrowly scoped, opt-in, and wired into
+  the operator. See its section below for what changed and why.
 
 ## Context
 
@@ -107,7 +112,7 @@ and adds the RBAC and metrics Services letting Prometheus reach it. Nothing abou
 the scrape TARGETS changed the shape they already had; this closes the object
 that tells Prometheus to scrape them.
 
-### 3. `PlantSpec.chaos`
+### 3. `PlantSpec.chaos` — REVERSED 2026-08-01 (`433f5b7`)
 
 The spec describes a `chaos` field on `PlantSpec`, carrying `enabled`, `mode`,
 and `schedule`. **It was dropped during Plan 2 with no record, and this section
@@ -126,6 +131,29 @@ permanent, whereas an absent field can be added in `v1alpha1` at any time withou
 breaking a single existing object. Plan 3 adds `chaos` at the same time as the
 controller that reads it.
 
+**This decision did not survive Plan 3.** By the time `chaos-buddy` existed and
+implemented a readiness-flap mode, the "inert field" argument above had become
+the opposite problem: `chaos-buddy`'s readiness-flap mode had no way to reach a
+Plant at all, because every Plant's ConfigMap hardcoded its chaos endpoint off.
+The mode could only be exercised against a fake client in tests, never proven
+against the live cluster — the same shape of gap the project had already cut
+latency/cpu-burn/oom chaos modes to avoid.
+
+Commit `433f5b7` restores a `chaos` field, but narrower than the original spec:
+`PlantSpec.Chaos` is a single `ChaosSpec{EnableEndpoints bool}`
+(`api/v1alpha1/plant_types.go`), not the original three-field `enabled`/`mode`/
+`schedule` block. `EnableEndpoints` defaults to `false`
+(`+kubebuilder:default=false`) and is threaded by `ConfigMapFor`
+(`internal/controller/resources.go`) into the workload's
+`BUDDY_ENABLE_CHAOS_ENDPOINTS` environment variable, which gates whether the
+Plant's pods expose `POST /chaos/readiness` at all. A Plant opts in
+per-instance (see `config/samples/plant-chaos.yaml`); the default posture for
+every other Plant is unchanged — no chaos endpoint reachable unless the owner
+asks for one. That closes the "inert field" objection this section originally
+raised: the field is no longer inert, and it does not weaken the default
+security posture, because reaching the endpoint still requires an explicit
+opt-in on the specific Plant being targeted.
+
 ## Consequences
 
 - `Plant` now owns **seven** children (Deployment, Service, ConfigMap,
@@ -140,10 +168,14 @@ controller that reads it.
 - `kubectl autoscale plant` will never do anything useful on this cluster. This
   is now permanent, not pending — see section 1's amendment above. `kubectl
   scale plant` keeps working, unaffected.
-- `kubectl explain plant.spec` shows six fields and no `chaos`. `chaos` (section
-  3) remains genuinely deferred/dropped, unaffected by this amendment. A reader
-  comparing the CRD against the design spec finds the gap and finds this ADR.
-- `PlantSpec.chaos` (section 3) is unaffected by this amendment: still
-  deliberately absent, still recorded as dropped-with-no-inert-field, per
-  Plan 3's own design (chaos runs as chaos-buddy, a separate workload, not a
-  per-Plant controller — see Plan 3's "Out of scope" section and its own ADR).
+- `kubectl explain plant.spec` now shows a `chaos` field again, as of
+  `433f5b7` (section 3, REVERSED). It is one field —
+  `chaos.enableEndpoints` (`boolean`, default `false`) — not the three-field
+  `enabled`/`mode`/`schedule` block the original design spec described. A
+  reader comparing the CRD against the design spec will find that narrower
+  shape and find this ADR explaining why.
+- Chaos injection is still not a per-Plant controller: `chaos-buddy` remains a
+  separate workload that acts on Plants from the outside (list/delete pods,
+  and now also `POST /chaos/readiness` when a Plant opts in). `PlantSpec.chaos`
+  only ever controls what a Plant's own pods *expose*; it does not make the
+  Plant controller itself schedule or perform chaos.
