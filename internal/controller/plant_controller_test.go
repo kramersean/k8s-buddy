@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -134,6 +135,59 @@ func TestReconcile_ServiceMonitorGracefullySkippedWithoutCRD(t *testing.T) {
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
 	require.Equal(t, got.Generation, got.Status.ObservedGeneration,
 		"reconciliation must fully complete (and keep completing) even though the ServiceMonitor CRD is absent")
+}
+
+// --- case 1a-ttl: negative RESTMapper probes are throttled --------------
+
+// TestServiceMonitorCRDAvailable_NegativeResultIsCachedWithTTL is a
+// white-box test (this file lives in package controller, not
+// controller_test) of serviceMonitorCRDAvailable's own caching contract,
+// added after a review caught that every reconcile of every Plant on a
+// cluster with no Prometheus Operator installed was paying a fresh
+// RESTMapper discovery round-trip: controller-runtime's RESTMapper only
+// memoizes a HIT, never a NoMatch. This test proves the fix without being
+// able to intercept the RESTMapper call itself (PlantReconciler embeds the
+// full client.Client interface, not a narrow seam built for mocking) by
+// instead observing serviceMonitorNegativeCacheUntil's own state
+// transitions, which can only move the way they do if a real reprobe (or
+// the lack of one) actually happened:
+//
+//   - A negative probe must cache a deadline in the future.
+//   - A second call still inside that window must leave the deadline
+//     UNCHANGED -- if it had silently re-probed anyway, the deadline would
+//     have advanced.
+//   - Forcing the cached deadline into the past (simulating
+//     serviceMonitorProbeTTL having elapsed) must trigger a real reprobe,
+//     observable as the deadline advancing again.
+func TestServiceMonitorCRDAvailable_NegativeResultIsCachedWithTTL(t *testing.T) {
+	// A throwaway reconciler sharing the suite's real (envtest) client --
+	// its RESTMapper genuinely has no match for the ServiceMonitor CRD,
+	// the same "CRD absent" state every other test in this file runs
+	// under (see suite_test.go's own CRDDirectoryPaths comment). An
+	// independent instance, not the one testMgr's own controller uses, so
+	// mutating its cache field here cannot affect any other test's Plant
+	// reconciliation.
+	r := &PlantReconciler{Client: testClient, Scheme: testScheme}
+	log := logr.Discard()
+
+	require.Zero(t, r.serviceMonitorNegativeCacheUntil.Load(), "starts uncached")
+
+	require.False(t, r.serviceMonitorCRDAvailable(log))
+	firstDeadline := r.serviceMonitorNegativeCacheUntil.Load()
+	require.Greater(t, firstDeadline, time.Now().UnixNano(),
+		"a negative probe must cache a deadline in the future")
+
+	require.False(t, r.serviceMonitorCRDAvailable(log))
+	require.Equal(t, firstDeadline, r.serviceMonitorNegativeCacheUntil.Load(),
+		"a call inside the TTL window must not re-probe -- the cached deadline would have advanced if it had")
+
+	// Force the cache to look exactly like it will serviceMonitorProbeTTL
+	// later on the real clock.
+	r.serviceMonitorNegativeCacheUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	require.False(t, r.serviceMonitorCRDAvailable(log), "still unavailable -- envtest never installs this CRD")
+	secondDeadline := r.serviceMonitorNegativeCacheUntil.Load()
+	require.Greater(t, secondDeadline, firstDeadline,
+		"an expired cache must trigger a real reprobe, observable as a freshly-advanced deadline")
 }
 
 // --- case 1b: the live Deployment actually runs as the Plant's SA --------

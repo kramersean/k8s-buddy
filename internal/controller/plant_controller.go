@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -165,7 +166,47 @@ type PlantReconciler struct {
 	// that simply doesn't run Prometheus. The zero value (unstarted) is
 	// ready to use, so no constructor needs to set this up.
 	serviceMonitorUnavailableLogOnce sync.Once
+
+	// serviceMonitorNegativeCacheUntil is a UnixNano deadline: while
+	// time.Now() is before it, serviceMonitorCRDAvailable returns a cached
+	// "unavailable" without calling the RESTMapper again. Zero means "no
+	// cached negative result, probe now."
+	//
+	// This exists because a NEGATIVE RESTMapper probe is not cheap the way
+	// a positive one is. controller-runtime's RESTMapper (v0.24.1) only
+	// memoizes a HIT; every NoMatch calls addKnownGroupAndReload and pays a
+	// fresh discovery round-trip to the API server, with no rate limiting
+	// of its own. Without this cache, every reconcile of every Plant on a
+	// cluster with no Prometheus Operator installed — the common case this
+	// project's own default demo state is in — would cost one discovery
+	// call per Plant per WateringInterval, forever. Negligible on a
+	// three-Plant demo cluster; a real scaling problem anywhere this
+	// operator manages hundreds of Plants against a cluster that simply
+	// never runs Prometheus.
+	//
+	// Deliberately asymmetric: only the NEGATIVE result is cached here. A
+	// POSITIVE probe is left to re-run the RESTMapper every reconcile,
+	// costing nothing extra (it's the cheap, already-memoized path) and
+	// keeping CRD REMOVAL noticed as promptly as CRD installation already
+	// is — see the "late-CRD pickup" behavior serviceMonitorCRDAvailable's
+	// own comment documents, which this cache preserves unchanged; only the
+	// unavailable path is now throttled.
+	//
+	// serviceMonitorProbeTTL is the throttle window, and therefore also the
+	// worst-case extra delay before a Prometheus Operator installed AFTER
+	// the most recent negative probe gets noticed: up to
+	// serviceMonitorProbeTTL past whatever the next Plant reconcile would
+	// have discovered it anyway.
+	serviceMonitorNegativeCacheUntil atomic.Int64
 }
+
+// serviceMonitorProbeTTL bounds how often serviceMonitorCRDAvailable will
+// re-probe the RESTMapper after a negative result. See
+// PlantReconciler.serviceMonitorNegativeCacheUntil's own comment for why
+// only the negative path needs throttling, and why this value is also the
+// worst-case delay before a newly-installed Prometheus Operator's CRD is
+// noticed.
+const serviceMonitorProbeTTL = 30 * time.Second
 
 // conflictingResourceError is returned by assertOwnership when a child's
 // name is already taken in the namespace by an object this operator does not
@@ -461,17 +502,40 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 // serviceMonitorUnavailableLogOnce), not once per Plant per reconcile, so a
 // cluster that genuinely has no Prometheus Operator doesn't accumulate one
 // log line per Plant per WateringInterval forever.
+//
+// A NEGATIVE result is additionally cached for serviceMonitorProbeTTL (see
+// PlantReconciler.serviceMonitorNegativeCacheUntil's own comment for the
+// full reasoning): every RESTMapping call that comes back NoMatch is a real
+// discovery round-trip to the API server on this controller-runtime
+// version, with no rate limiting of its own, so an uncached negative check
+// running on every reconcile of every Plant would cost one such round-trip
+// per Plant per WateringInterval on any cluster with no Prometheus
+// installed — this project's own default state. A positive result is never
+// cached here; the RESTMapper already memoizes that path internally, and
+// leaving it unthrottled is what keeps CRD REMOVAL detected exactly as
+// promptly as CRD installation already is.
 func (r *PlantReconciler) serviceMonitorCRDAvailable(log logr.Logger) bool {
+	if until := r.serviceMonitorNegativeCacheUntil.Load(); until != 0 && time.Now().UnixNano() < until {
+		return false
+	}
+
 	_, err := r.RESTMapper().RESTMapping(serviceMonitorGVK.GroupKind(), serviceMonitorGVK.Version)
 	if err != nil {
+		r.serviceMonitorNegativeCacheUntil.Store(time.Now().Add(serviceMonitorProbeTTL).UnixNano())
 		r.serviceMonitorUnavailableLogOnce.Do(func() {
 			log.Info("ServiceMonitor CRD (monitoring.coreos.com/v1) not found on this cluster; "+
 				"every Plant will skip its ServiceMonitor child until the Prometheus Operator is installed "+
 				"(this is expected and does not affect the other six children)",
-				"error", err.Error())
+				"error", err.Error(), "reprobeAfter", serviceMonitorProbeTTL.String())
 		})
 		return false
 	}
+
+	// A positive probe clears any stale negative cache so a CRD that is
+	// removed again later starts the throttle fresh rather than a leftover
+	// deadline from a much earlier outage silently suppressing the very
+	// next real probe.
+	r.serviceMonitorNegativeCacheUntil.Store(0)
 	return true
 }
 
