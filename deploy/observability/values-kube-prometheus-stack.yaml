@@ -34,6 +34,24 @@ kubeEtcd:
 kubeProxy:
   enabled: false
 
+# Disabled deliberately, not merely left at a resource-tuned default like
+# the components below. node-exporter is the one component in this stack
+# that has no narrower posture than `privileged` grants it (hostNetwork,
+# hostPID, hostPath mounts of /proc, /sys, /) -- unlike promtail, which
+# k8s-buddy-observability's `privileged` ceiling exists FOR (there is no
+# way to ship a node-level log collector without hostPath), node-exporter's
+# node CPU/memory/disk metrics are never read by
+# observability/dashboards/k8s-buddy.json or observability/rules/*.yaml --
+# grepped and confirmed empty (no `node_*` metric referenced anywhere in
+# either). Disabling it removes three more privileged pods from the
+# cluster for zero loss to this project's own story: the dashboard, the
+# SLO, and the operational alerts all read buddy_*, kube_*, and
+# controller_runtime_* series, never node-exporter's. (promtail remains the
+# reason this namespace cannot be tightened below `privileged` regardless
+# of this change -- see namespace.yaml's own comment.)
+nodeExporter:
+  enabled: false
+
 alertmanager:
   alertmanagerSpec:
     replicas: 1
@@ -121,15 +139,6 @@ grafana:
   #   kubectl -n k8s-buddy-observability get secret kube-prometheus-stack-grafana \
   #     -o jsonpath='{.data.admin-password}' | base64 -d
   # `make grafana-port-forward` prints this command.
-
-prometheus-node-exporter:
-  resources:
-    requests:
-      cpu: 25m
-      memory: 32Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
 
 kube-state-metrics:
   resources:
