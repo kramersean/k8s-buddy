@@ -10,15 +10,19 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,24 +32,54 @@ import (
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
 )
 
-// plantFinalizer is added to every Plant this operator observes and removed
-// only once cleanup has run, so the API server defers actual deletion of
-// the Plant until the operator has had a chance to react to it (see
-// Reconcile's deletion branch).
-const plantFinalizer = "buddy.k8s-buddy.io/finalizer"
+// This reconciler adds NO finalizer to a Plant, deliberately. Every child it
+// creates carries a controller owner reference back to its Plant, so
+// Kubernetes' own garbage collector removes all six of them when the Plant
+// goes away — there is nothing for a finalizer to clean up, and a finalizer
+// that cleans nothing only makes `kubectl delete plant` hang forever
+// whenever the operator is down. See
+// docs/adr/0007-no-finalizer-on-plant.md for the full reasoning and for the
+// condition under which it would come back.
 
 // minRequeueInterval is the floor Reconcile applies to
-// Plant.Spec.WateringInterval before requeuing. The CRD's own
-// +kubebuilder:default="30s" marker means a Plant that goes through normal
-// API-server defaulting never carries a zero Duration, but a hand-built
-// Plant that bypasses defaulting (as Task 4's envtest suite, and any other
-// Go caller, can construct directly) can carry a genuinely zero
-// WateringInterval. ctrl.Result{RequeueAfter: 0} means "do not requeue on a
-// timer at all," which would silently stop this Plant's status from ever
-// refreshing again — not a loud failure, just a Plant that quietly stops
-// being watered. Flooring at minRequeueInterval keeps periodic reconciliation
-// alive even for a Plant that never went through defaulting.
+// Plant.Spec.WateringInterval before requeuing.
+//
+// It guards two different failure modes with one clamp:
+//
+//   - A zero interval. ctrl.Result{RequeueAfter: 0} means "do not requeue on
+//     a timer at all," which would silently stop a Plant's status from ever
+//     refreshing again — not a loud failure, just a Plant that quietly stops
+//     being watered. The CRD's +kubebuilder:default="30s" means a Plant that
+//     went through API-server defaulting never carries a zero Duration, but a
+//     hand-built Plant constructed directly in Go (as the envtest suite and
+//     any other Go caller can) can.
+//   - A sub-second interval. `wateringInterval: 1ms` used to be a perfectly
+//     valid Plant that pinned a reconcile worker in a 1ms busy loop forever,
+//     hammering the API server for the lifetime of the object. The API-level
+//     bound on the field (see PlantSpec.WateringInterval's Pattern and
+//     XValidation markers) rejects that at admission, which is where it
+//     belongs; this floor is the second layer, for any Plant that never
+//     passed through admission at all.
+//
+// The comparison below is `<`, not `<= 0`: `<= 0` clamped only the first of
+// those two cases and let the second straight through.
 const minRequeueInterval = 30 * time.Second
+
+// maxPlantNameLength is the longest Plant name whose own name can still be
+// used as a label VALUE on the children this operator generates. LabelsFor
+// puts p.Name into app.kubernetes.io/instance and buddy.k8s-buddy.io/plant,
+// and Kubernetes caps a label value at 63 characters — so a 64-character
+// Plant produces an invalid label set, every child create is rejected by the
+// API server forever, and (without the guard in Reconcile) nothing on the
+// Plant ever says why.
+//
+// metadata.name itself cannot be length-checked with a +kubebuilder
+// validation marker: the markers apply to the schema under .spec, and
+// .metadata's schema is fixed by the API server (which allows names up to
+// 253 characters for a namespaced object). That leaves a reconciler guard as
+// the only place this can be caught, so it is caught loudly — Degraded=True,
+// reason InvalidName, with a message naming the actual limit.
+const maxPlantNameLength = validation.LabelValueMaxLength
 
 // Event reasons emitted against a Plant. Emitted sparingly — see Reconcile
 // for exactly when each fires — because an Event on every no-op reconcile
@@ -58,13 +92,32 @@ const (
 	eventPlantUpdated   = "PlantUpdated"
 	eventPlantDegraded  = "PlantDegraded"
 	eventPlantRecovered = "PlantRecovered"
-	eventPlantDeleting  = "PlantDeleting"
+	// eventPlantBlocked fires when a Plant cannot be reconciled at all for
+	// a reason no retry will fix on its own: a name too long to be a label
+	// value, or a same-named object in the namespace that this operator
+	// refuses to seize. Both also set Degraded=True; see markDegraded.
+	eventPlantBlocked = "PlantBlocked"
+)
+
+// Degraded condition reasons this reconciler sets directly, as opposed to
+// the readiness-derived reasons status.go computes from the observed
+// Deployment. Both describe a Plant that cannot be reconciled at all, so
+// neither is ever transient in the way ReasonInsufficientReplicas is.
+const (
+	// ReasonInvalidName is Degraded=True because metadata.name is longer
+	// than a Kubernetes label value may be, so no child could ever be
+	// created for this Plant. See maxPlantNameLength.
+	ReasonInvalidName = "InvalidName"
+	// ReasonConflictingResource is Degraded=True because an object of the
+	// same name and kind already exists in the namespace and is not managed
+	// by this operator. See assertNotForeign.
+	ReasonConflictingResource = "ConflictingResource"
 )
 
 // PlantReconciler reconciles a Plant object: it drives the generated
-// Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount
-// toward the state resources.go's builders describe, and reports their
-// aggregate health back onto Plant.status.
+// Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount, and
+// NetworkPolicy toward the state resources.go's builders describe, and
+// reports their aggregate health back onto Plant.status.
 type PlantReconciler struct {
 	client.Client
 	// Scheme is used to set the controller owner reference on every child
@@ -74,26 +127,71 @@ type PlantReconciler struct {
 	// Recorder emits the Events described above against the Plant being
 	// reconciled.
 	Recorder record.EventRecorder
+	// APIReader is a direct, UNCACHED reader (manager.GetAPIReader()), used
+	// by assertNotForeign and nowhere else.
+	//
+	// It has to be uncached, and the reason is subtle enough to be worth
+	// stating: cmd/plant-operator restricts the manager's informer cache for
+	// every child type to objects labelled
+	// app.kubernetes.io/managed-by=plant-operator. That is exactly the right
+	// cache scope — but it also means the cached client CANNOT SEE a
+	// pre-existing, foreign object of the same name, which is precisely the
+	// object assertNotForeign exists to refuse to adopt. Through the cache
+	// that object reads as "does not exist," CreateOrUpdate would take the
+	// create path, and the operator would learn about it only as an opaque
+	// AlreadyExists error with no Degraded condition and no Event.
+	//
+	// Left nil (as a unit test constructing a bare PlantReconciler may), the
+	// embedded Client is used instead.
+	APIReader client.Reader
+}
+
+// conflictingResourceError is returned by assertNotForeign when a child's
+// name is already taken in the namespace by an object this operator does not
+// manage. It is a distinct type, rather than a sentinel or a string match, so
+// Reconcile can errors.As it out of the fmt.Errorf wrapping reconcileChildren
+// applies and turn it into a Degraded=True/ConflictingResource condition
+// instead of an anonymous reconcile failure.
+type conflictingResourceError struct {
+	kind      string
+	namespace string
+	name      string
+	why       string
+}
+
+func (e *conflictingResourceError) Error() string {
+	return fmt.Sprintf("refusing to adopt existing %s %s/%s: %s", e.kind, e.namespace, e.name, e.why)
 }
 
 // +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/status,verbs=get;update;patch
+// plants/finalizers is retained even though this operator adds NO finalizer
+// to a Plant (see ADR 0007). It is not about finalizers this controller
+// writes: the OwnerReferencesPermissionEnforcement admission plugin, when a
+// cluster enables it, requires `update` on the OWNER's finalizers subresource
+// before it will accept an owner reference carrying blockOwnerDeletion: true —
+// which controllerutil.SetControllerReference sets on all six children,
+// unconditionally. Dropping this line would make the operator work on kind
+// (the plugin is off by default) and fail on a hardened cluster.
 // +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=create;get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile drives a single Plant toward its desired state. See the file
-// comment and this package's task brief for the exact six-step flow;
-// summarized inline at each step below.
+// Reconcile drives a single Plant toward its desired state: fetch, validate
+// the name, apply every owned child, write status, requeue.
 func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Step 1: fetch the Plant. A NotFound here means it was already
-	// deleted (and, since the finalizer is gone by the time that happens,
-	// there is nothing left for this reconciler to do) — not an error
-	// worth returning or logging as one.
+	log := logf.FromContext(ctx)
+
+	// Step 1: fetch the Plant. A NotFound here means it was already deleted
+	// — not an error worth returning or logging as one. There is no
+	// deletion branch after this and no finalizer to remove: the six owned
+	// children are removed by Kubernetes' own garbage collector, walking
+	// the controller owner references reconcileChildren sets. See ADR 0007.
 	plant := &buddyv1alpha1.Plant{}
 	if err := r.Get(ctx, req.NamespacedName, plant); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -102,41 +200,53 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, fmt.Errorf("fetching plant %s: %w", req.NamespacedName, err)
 	}
 
-	// Step 2: deletion in progress. Kubernetes sets DeletionTimestamp and
-	// then blocks the actual delete until every finalizer is removed, so
-	// this branch is where the operator gets a guaranteed last chance to
-	// react before the Plant disappears.
+	// A Plant already being deleted needs nothing from this operator, and
+	// touching its status once DeletionTimestamp is set only produces
+	// pointless writes (and, once the object is actually gone, spurious
+	// NotFound errors) while the garbage collector does the real work.
 	if plant.DeletionTimestamp != nil {
-		return r.reconcileDelete(ctx, plant)
+		return ctrl.Result{}, nil
 	}
 
-	// Step 3: ensure the finalizer is present before this reconciler ever
-	// creates a child for this Plant. Returning immediately after adding
-	// it (rather than falling through to step 4 in the same pass) means
-	// every subsequent reconcile — including the very next one — always
-	// observes a Plant that already carries the finalizer, which keeps
-	// the "does this Plant have owned children yet" question answered by
-	// a single, uniform check instead of a first-reconcile special case.
-	if !controllerutil.ContainsFinalizer(plant, plantFinalizer) {
-		controllerutil.AddFinalizer(plant, plantFinalizer)
-		if err := r.Update(ctx, plant); err != nil {
-			return ctrl.Result{}, fmt.Errorf("adding finalizer to plant %s: %w", req.NamespacedName, err)
+	// Step 2: reject a Plant whose own name cannot legally become a label
+	// value on its children. Without this the API server rejects every
+	// single child create, forever, with nothing on the Plant explaining
+	// why. No requeue: metadata.name is immutable, so retrying is
+	// guaranteed to fail identically — the Degraded condition IS the
+	// outcome.
+	if len(plant.Name) > maxPlantNameLength {
+		msg := fmt.Sprintf(
+			"plant name is %d characters; it is used as a label value on every child and Kubernetes caps label values at %d",
+			len(plant.Name), maxPlantNameLength)
+		log.Info("refusing to reconcile plant with an over-long name", "plant", plant.Name, "length", len(plant.Name))
+		if err := r.markDegraded(ctx, plant, ReasonInvalidName, msg); err != nil {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// Step 4: reconcile every owned child toward its desired state.
+	// Step 3: reconcile every owned child toward its desired state.
 	deployment, created, updated, err := r.reconcileChildren(ctx, plant)
 	if err != nil {
+		// A name collision with an object this operator does not manage is
+		// not a transient API failure: it is a state a human has to
+		// resolve, so it is surfaced on the Plant itself rather than only
+		// in the operator's logs.
+		var conflict *conflictingResourceError
+		if errors.As(err, &conflict) {
+			if markErr := r.markDegraded(ctx, plant, ReasonConflictingResource, conflict.Error()); markErr != nil {
+				return ctrl.Result{}, markErr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 	if created {
-		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantCreated, "created Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount")
+		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantCreated, "created Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount, and NetworkPolicy")
 	} else if updated {
 		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantUpdated, "corrected drift on one or more owned children")
 	}
 
-	// Step 5: recompute status and write it through the status
+	// Step 4: recompute status and write it through the status
 	// subresource only — never via a plain Update on the main object,
 	// which would let the operator race a user's own concurrent edits
 	// to spec/metadata instead of touching only the fields it owns.
@@ -144,58 +254,71 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 
-	// Step 6: come back in WateringInterval regardless of whether
+	// Step 5: come back in WateringInterval regardless of whether
 	// anything changed this pass, so status — mood, health, readiness —
-	// keeps refreshing even when nothing external has changed. Floored at
-	// minRequeueInterval — see its own comment — for a hand-built Plant
-	// whose WateringInterval never went through API-server defaulting.
-	requeueAfter := plant.Spec.WateringInterval.Duration
-	if requeueAfter <= 0 {
-		requeueAfter = minRequeueInterval
-	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	// keeps refreshing even when nothing external has changed.
+	return ctrl.Result{RequeueAfter: requeueIntervalFor(plant)}, nil
 }
 
-// reconcileDelete runs finalizer cleanup for a Plant whose DeletionTimestamp
-// is set: it emits the PlantDeleting event, logs, and removes the
-// finalizer so the API server can complete the delete.
+// requeueIntervalFor returns the delay Reconcile requeues plant after: its
+// own WateringInterval, clamped up to minRequeueInterval. Split out of
+// Reconcile as a pure function purely so the clamp is directly testable
+// without a control plane — the API-level bound on the field means a Plant
+// carrying a sub-30s interval cannot be created through a real API server at
+// all, which would otherwise make the clamp untestable through envtest and
+// leave the second layer of defence permanently unexercised.
+func requeueIntervalFor(plant *buddyv1alpha1.Plant) time.Duration {
+	if plant.Spec.WateringInterval.Duration < minRequeueInterval {
+		return minRequeueInterval
+	}
+	return plant.Spec.WateringInterval.Duration
+}
+
+// markDegraded sets Degraded=True with the given reason and message on
+// plant's status and writes it through the status subresource, emitting a
+// PlantBlocked warning Event the first time the condition actually changes.
 //
-// It deliberately does NOT delete the Deployment, Service, ConfigMap,
-// PodDisruptionBudget, or ServiceAccount by hand. Every one of them carries a
-// controller owner reference back to this Plant (set in reconcileChildren via
-// controllerutil.SetControllerReference), and Kubernetes' own garbage
-// collector removes owned objects automatically once their owner is gone.
-// Deleting them here would be redundant at best; at worst, doing it
-// unconditionally on every deletion — including ones that fail partway
-// through, or race with the garbage collector — is exactly the kind of
-// manual cleanup logic that owner references exist to make unnecessary.
-// Trusting garbage collection, not reimplementing it, is the point.
-func (r *PlantReconciler) reconcileDelete(ctx context.Context, plant *buddyv1alpha1.Plant) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+// The write goes through the same statusChanged gate reconcileStatus uses,
+// for the same reason: a Plant blocked on a name collision is reconciled
+// again on every backoff retry, and an unconditional Status().Update here
+// would turn a stuck Plant into a permanent write storm — the exact defect
+// status.go's LastWatered exclusion exists to prevent, reintroduced through
+// a different door. meta.SetStatusCondition preserves LastTransitionTime
+// when nothing moved, so the second and every subsequent call compute a
+// byte-identical status and write nothing at all.
+func (r *PlantReconciler) markDegraded(ctx context.Context, plant *buddyv1alpha1.Plant, reason, message string) error {
+	newStatus := *plant.Status.DeepCopy()
+	conditions := append([]metav1.Condition(nil), plant.Status.Conditions...)
+	meta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: plant.Generation,
+		LastTransitionTime: metav1.NewTime(now()),
+	})
+	newStatus.Conditions = conditions
 
-	if !controllerutil.ContainsFinalizer(plant, plantFinalizer) {
-		// Finalizer already removed by a previous pass; nothing left to
-		// do while the API server finishes the delete.
-		return ctrl.Result{}, nil
+	if !statusChanged(plant.Status, newStatus) {
+		return nil
 	}
 
-	log.Info("plant deletion in progress; owned children will be garbage-collected via owner references", "plant", plant.Name)
-	r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantDeleting, "plant is being deleted; owned children will be garbage-collected")
+	r.Recorder.Event(plant, corev1.EventTypeWarning, eventPlantBlocked, message)
 
-	controllerutil.RemoveFinalizer(plant, plantFinalizer)
-	if err := r.Update(ctx, plant); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing finalizer from plant %s/%s: %w", plant.Namespace, plant.Name, err)
+	plant.Status = newStatus
+	if err := r.Status().Update(ctx, plant); err != nil {
+		return fmt.Errorf("marking plant %s/%s degraded (%s): %w", plant.Namespace, plant.Name, reason, err)
 	}
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // reconcileChildren applies the Deployment, Service, ConfigMap,
-// PodDisruptionBudget, and ServiceAccount resources.go's builders describe
-// for plant, setting a controller owner reference on each so Kubernetes
-// garbage collection can find them later. It returns the (now-current)
-// Deployment for status.go's
-// computeStatus to read, plus whether any child was newly created or
-// updated so Reconcile can decide which Event, if any, to emit.
+// PodDisruptionBudget, ServiceAccount, and NetworkPolicy resources.go's
+// builders describe for plant, setting a controller owner reference on each
+// so Kubernetes garbage collection can find them later. It returns the
+// (now-current) Deployment for status.go's computeStatus to read, plus
+// whether any child was newly created or updated so Reconcile can decide
+// which Event, if any, to emit.
 //
 // Every mutate function below assigns only the fields the operator owns.
 // That is deliberate and load-bearing: controllerutil.CreateOrUpdate
@@ -223,51 +346,107 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 	}
 
 	deployment := &appsv1.Deployment{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
-		return r.mutateDeployment(plant, deployment)
-	})
-	if err != nil {
-		return nil, false, false, fmt.Errorf("reconciling deployment for plant %s/%s: %w", plant.Namespace, plant.Name, err)
-	}
-	note(op)
-
 	service := &corev1.Service{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
-	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
-		return r.mutateService(plant, service)
-	})
-	if err != nil {
-		return nil, false, false, fmt.Errorf("reconciling service for plant %s/%s: %w", plant.Namespace, plant.Name, err)
-	}
-	note(op)
-
 	configMap := &corev1.ConfigMap{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
-	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
-		return r.mutateConfigMap(plant, configMap)
-	})
-	if err != nil {
-		return nil, false, false, fmt.Errorf("reconciling configmap for plant %s/%s: %w", plant.Namespace, plant.Name, err)
-	}
-	note(op)
-
 	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: objectMeta(plant.Name+"-pdb", plant.Namespace)}
-	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
-		return r.mutatePodDisruptionBudget(plant, pdb)
-	})
-	if err != nil {
-		return nil, false, false, fmt.Errorf("reconciling poddisruptionbudget for plant %s/%s: %w", plant.Namespace, plant.Name, err)
-	}
-	note(op)
-
 	serviceAccount := &corev1.ServiceAccount{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
-	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
-		return r.mutateServiceAccount(plant, serviceAccount)
-	})
-	if err != nil {
-		return nil, false, false, fmt.Errorf("reconciling serviceaccount for plant %s/%s: %w", plant.Namespace, plant.Name, err)
+	networkPolicy := &networkingv1.NetworkPolicy{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
+
+	// One table, six entries, so "how many children does a Plant own" has a
+	// single answer in the source rather than six near-identical blocks that
+	// a seventh child could quietly be added beside without the count ever
+	// being restated.
+	children := []struct {
+		kind   string
+		obj    client.Object
+		mutate controllerutil.MutateFn
+	}{
+		{"Deployment", deployment, func() error { return r.mutateDeployment(plant, deployment) }},
+		{"Service", service, func() error { return r.mutateService(plant, service) }},
+		{"ConfigMap", configMap, func() error { return r.mutateConfigMap(plant, configMap) }},
+		{"PodDisruptionBudget", pdb, func() error { return r.mutatePodDisruptionBudget(plant, pdb) }},
+		{"ServiceAccount", serviceAccount, func() error { return r.mutateServiceAccount(plant, serviceAccount) }},
+		{"NetworkPolicy", networkPolicy, func() error { return r.mutateNetworkPolicy(plant, networkPolicy) }},
 	}
-	note(op)
+
+	for _, child := range children {
+		if err := r.assertNotForeign(ctx, plant, child.kind, child.obj); err != nil {
+			return nil, false, false, fmt.Errorf("reconciling %s for plant %s/%s: %w", child.kind, plant.Namespace, plant.Name, err)
+		}
+		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, child.obj, child.mutate)
+		if err != nil {
+			return nil, false, false, fmt.Errorf("reconciling %s for plant %s/%s: %w", child.kind, plant.Namespace, plant.Name, err)
+		}
+		note(op)
+	}
 
 	return deployment, created, updated, nil
+}
+
+// assertNotForeign refuses to take over an object this operator did not
+// create.
+//
+// controllerutil.CreateOrUpdate is Get-then-mutate-then-Update, and
+// controllerutil.SetControllerReference happily stamps a controller owner
+// reference onto whatever object it is handed. Together they mean an
+// unguarded reconciler ADOPTS any pre-existing object that merely happens to
+// share a child's name. That is not hypothetical here: a Plant named
+// `buddy-api` created in namespace `k8s-buddy` would seize Plan 1's own
+// static Deployment, Service, and ServiceAccount — and then wedge
+// permanently, because mutateDeployment only sets spec.selector when nil, so
+// the seized Deployment keeps Plan 1's three-key selector while its pod
+// template gets this operator's two-key label set, and every subsequent
+// Update is rejected as an immutable-selector change. The Plant would sit
+// broken, Plan 1's demo would be gone, and the only signal would be a
+// reconcile error in the operator's log.
+//
+// Two independent conditions make an object safe to write:
+//
+//   - it carries app.kubernetes.io/managed-by=plant-operator, and
+//   - its controller owner reference (if any) points at THIS Plant.
+//
+// The second is what stops a Plant from stealing a differently-named Plant's
+// child, and what makes a child whose owner reference a human has
+// re-pointed elsewhere refuse to be re-seized rather than silently fought
+// over.
+//
+// The read goes through r.APIReader, uncached, on purpose — see the field's
+// own comment. A NotFound is the normal, overwhelmingly common case: nothing
+// exists yet, so there is nothing to refuse.
+func (r *PlantReconciler) assertNotForeign(ctx context.Context, plant *buddyv1alpha1.Plant, kind string, obj client.Object) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+
+	probe, ok := obj.DeepCopyObject().(client.Object)
+	if !ok { // unreachable: every child above is a client.Object
+		return fmt.Errorf("child %s is not a client.Object", kind)
+	}
+
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	if err := reader.Get(ctx, key, probe); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("checking whether %s %s already exists: %w", kind, key, err)
+	}
+
+	if probe.GetLabels()[LabelManagedBy] != appManagedBy {
+		return &conflictingResourceError{
+			kind: kind, namespace: key.Namespace, name: key.Name,
+			why: fmt.Sprintf("it already exists and does not carry %s=%s, so it was not created by this operator", LabelManagedBy, appManagedBy),
+		}
+	}
+
+	if owner := metav1.GetControllerOf(probe); owner == nil || owner.UID != plant.UID {
+		return &conflictingResourceError{
+			kind: kind, namespace: key.Namespace, name: key.Name,
+			why: "it already exists and its controller owner reference does not point at this Plant",
+		}
+	}
+
+	return nil
 }
 
 // objectMeta returns the minimal ObjectMeta CreateOrUpdate needs before its
@@ -311,6 +490,27 @@ func mergeLabels(existing, owned map[string]string) map[string]string {
 // keys never change for a given Plant across its lifetime, which is what
 // makes "set once, never touch again" correct rather than merely
 // convenient.
+//
+// EVERY OTHER field DeploymentFor sets on the pod spec is copied below,
+// unconditionally. That completeness is the whole contract of this function
+// and it is easy to break silently: ServiceAccountName was missing here for
+// two tasks, so DeploymentFor set it, resources_test.go asserted it on the
+// BUILDER's output, and every Pod on the live cluster nonetheless ran as the
+// namespace's `default` ServiceAccount — the Plant's own ServiceAccount was
+// created, owned, and garbage-collected purely for show. A field this
+// function forgets is invisible to every test that only ever inspects
+// DeploymentFor. That is why the envtest suite now asserts
+// serviceAccountName on the LIVE child Deployment read back from the API
+// server, and why CI asserts it on the running Pods themselves.
+//
+// Fields DeploymentFor deliberately leaves to the server, and which this
+// function therefore must NOT copy: Strategy, RevisionHistoryLimit,
+// ProgressDeadlineSeconds, MinReadySeconds, Paused (Deployment spec);
+// RestartPolicy, DNSPolicy, SchedulerName, SecurityContext.FSGroupChangePolicy,
+// DeprecatedServiceAccount (pod spec); TerminationMessagePath and
+// TerminationMessagePolicy (container, handled by mergeContainers). All are
+// API-server defaults, and copying a builder's zero value over them would
+// produce a permanent phantom diff on every single reconcile.
 func (r *PlantReconciler) mutateDeployment(plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) error {
 	desired := DeploymentFor(plant)
 
@@ -328,6 +528,9 @@ func (r *PlantReconciler) mutateDeployment(plant *buddyv1alpha1.Plant, deploymen
 
 	podSpec := &deployment.Spec.Template.Spec
 	desiredPodSpec := desired.Spec.Template.Spec
+	// Without this line the Plant's ServiceAccount exists and is owned and
+	// is garbage-collected correctly, and its Pods still run as `default`.
+	podSpec.ServiceAccountName = desiredPodSpec.ServiceAccountName
 	podSpec.AutomountServiceAccountToken = desiredPodSpec.AutomountServiceAccountToken
 	podSpec.SecurityContext = desiredPodSpec.SecurityContext
 	podSpec.TopologySpreadConstraints = desiredPodSpec.TopologySpreadConstraints
@@ -471,6 +674,30 @@ func (r *PlantReconciler) mutateServiceAccount(plant *buddyv1alpha1.Plant, servi
 	return nil
 }
 
+// mutateNetworkPolicy sets networkPolicy's fields to those
+// NetworkPolicyFor(plant) describes, owning PodSelector, PolicyTypes,
+// Ingress, and Egress — which is every field a NetworkPolicySpec has, so
+// unlike the Deployment and Service there is nothing server-assigned here to
+// preserve. PodSelector is assigned unconditionally rather than create-only:
+// a NetworkPolicy's podSelector is mutable (unlike a Deployment's, a
+// Service's, or a PDB's), so correcting drift on it is both legal and
+// exactly what should happen if someone widens this policy by hand.
+func (r *PlantReconciler) mutateNetworkPolicy(plant *buddyv1alpha1.Plant, networkPolicy *networkingv1.NetworkPolicy) error {
+	desired := NetworkPolicyFor(plant)
+
+	if err := controllerutil.SetControllerReference(plant, networkPolicy, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on networkpolicy: %w", err)
+	}
+
+	networkPolicy.Labels = mergeLabels(networkPolicy.Labels, desired.Labels)
+	networkPolicy.Spec.PodSelector = desired.Spec.PodSelector
+	networkPolicy.Spec.PolicyTypes = desired.Spec.PolicyTypes
+	networkPolicy.Spec.Ingress = desired.Spec.Ingress
+	networkPolicy.Spec.Egress = desired.Spec.Egress
+
+	return nil
+}
+
 // reconcileStatus computes plant's new status from deployment and writes it
 // through the status subresource, but only when something other than
 // LastWatered actually changed.
@@ -537,9 +764,18 @@ func conditionTrue(conditions []metav1.Condition, conditionType string) bool {
 
 // SetupWithManager wires PlantReconciler into mgr: it reconciles on changes
 // to Plant itself, plus any change to a Deployment, Service, ConfigMap,
-// PodDisruptionBudget, or ServiceAccount that this reconciler owns, so drift
-// a human (or another controller) introduces on a child gets corrected
-// without waiting for the next WateringInterval.
+// PodDisruptionBudget, ServiceAccount, or NetworkPolicy that this reconciler
+// owns, so drift a human (or another controller) introduces on a child gets
+// corrected without waiting for the next WateringInterval.
+//
+// Each Owns() below establishes an informer on that type. What those
+// informers actually CACHE is narrowed to
+// app.kubernetes.io/managed-by=plant-operator by the cache.Options
+// cmd/plant-operator/main.go passes to the manager — without it, an operator
+// watching ConfigMaps and ServiceAccounts holds every ConfigMap and every
+// ServiceAccount in the cluster in memory. The Plant type itself is
+// deliberately NOT filtered: a Plant a user forgot to label would otherwise
+// be invisible to the operator that exists to reconcile it.
 func (r *PlantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&buddyv1alpha1.Plant{}).
@@ -548,6 +784,7 @@ func (r *PlantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Named("plant").
 		Complete(r)
 }

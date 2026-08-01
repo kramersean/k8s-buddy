@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,9 +23,9 @@ import (
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
 )
 
-// --- case 1: creation owns all five children ----------------------------
+// --- case 1: creation owns all six children -----------------------------
 
-func TestReconcile_CreatesAllFiveChildrenWithOwnerReferences(t *testing.T) {
+func TestReconcile_CreatesAllSixChildrenWithOwnerReferences(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 3)
 	createPlant(t, plant)
@@ -55,26 +56,86 @@ func TestReconcile_CreatesAllFiveChildrenWithOwnerReferences(t *testing.T) {
 	assertControllerOwnerRef(t, serviceAccount, owner)
 	require.NotNil(t, serviceAccount.AutomountServiceAccountToken)
 	require.False(t, *serviceAccount.AutomountServiceAccountToken)
+
+	// The sixth child. Without it a Plant runs in a namespace with no
+	// NetworkPolicy of its own, which left operator-managed pods strictly
+	// less constrained than Plan 1's static ones.
+	networkPolicy := &networkingv1.NetworkPolicy{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, networkPolicy))
+	assertControllerOwnerRef(t, networkPolicy, owner)
+	require.ElementsMatch(t,
+		[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+		networkPolicy.Spec.PolicyTypes,
+		"both policy types must be declared, or the undeclared direction stays wide open")
+	require.Equal(t, SelectorFor(owner), networkPolicy.Spec.PodSelector.MatchLabels,
+		"the policy must select only this Plant's own pods, never the whole namespace")
 }
 
-// --- case 2: finalizer added on creation ---------------------------------
+// --- case 1b: the live Deployment actually runs as the Plant's SA --------
 
-// TestReconcile_AddsFinalizerOnCreate checks against the literal finalizer
-// string, not the plantFinalizer constant waitForFinalizer (and every other
-// test) uses: the finalizer is user-visible API surface the operator plan
-// specifies verbatim, so a test that only ever compares against the source
-// constant would keep passing even if that constant's VALUE silently
-// drifted away from "buddy.k8s-buddy.io/finalizer".
-func TestReconcile_AddsFinalizerOnCreate(t *testing.T) {
+// TestReconcile_LiveDeploymentRunsAsPlantServiceAccount asserts against the
+// child Deployment READ BACK FROM THE API SERVER, not against DeploymentFor's
+// output.
+//
+// That distinction is the entire point of this test. DeploymentFor set
+// ServiceAccountName from the day it was written, resources_test.go asserted
+// it on the builder, and both stayed green for two whole tasks while
+// mutateDeployment silently failed to copy the field onto the live object --
+// so every Pod on the real cluster ran as the namespace's `default`
+// ServiceAccount while the Plant's own ServiceAccount was created, owned, and
+// garbage-collected purely for show. A builder assertion structurally cannot
+// catch a mutate function that drops a field; only reading the live child can.
+func TestReconcile_LiveDeploymentRunsAsPlantServiceAccount(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 3)
 	createPlant(t, plant)
 
-	waitForFinalizer(t, plant)
+	waitForChildrenExist(t, plant)
 
-	got := &buddyv1alpha1.Plant{}
-	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
-	require.Contains(t, got.Finalizers, "buddy.k8s-buddy.io/finalizer")
+	deployment := &appsv1.Deployment{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, deployment))
+
+	require.Equal(t, plant.Name, deployment.Spec.Template.Spec.ServiceAccountName,
+		"the live Deployment's pod template must name the Plant's own ServiceAccount; an empty value "+
+			"here means every pod silently runs as the namespace's `default` SA")
+
+	// The account it names must actually exist, or the pods would be
+	// unschedulable rather than merely mis-identified.
+	serviceAccount := &corev1.ServiceAccount{}
+	require.NoError(t, testClient.Get(testCtx,
+		client.ObjectKey{Namespace: ns, Name: deployment.Spec.Template.Spec.ServiceAccountName}, serviceAccount))
+}
+
+// --- case 2: NO finalizer is ever added ---------------------------------
+
+// TestReconcile_AddsNoFinalizer is the inverse of the test it replaces.
+//
+// The old behavior added "buddy.k8s-buddy.io/finalizer" to every Plant and
+// removed it again on deletion, and that removal path performed no cleanup at
+// all -- correctly, because all six children are removed by garbage
+// collection via the owner references case 1 asserts. What the finalizer
+// actually bought was a Plant that cannot be deleted while the operator is
+// down: `kubectl delete plant` returns, the object sits with a
+// DeletionTimestamp indefinitely, and the only fix is hand-editing
+// metadata.finalizers. Pure availability liability in exchange for nothing.
+// See docs/adr/0007-no-finalizer-on-plant.md.
+//
+// The assertion is deliberately "no finalizers at all" rather than "not that
+// specific string": reintroducing the same liability under a new name must
+// fail this test too.
+func TestReconcile_AddsNoFinalizer(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "fernie", 3)
+	createPlant(t, plant)
+
+	// Wait for a reconcile that has definitely run to completion before
+	// asserting an absence -- otherwise this would pass trivially against a
+	// Plant the operator has not looked at yet.
+	waitForChildrenExist(t, plant)
+	waitForStatusPopulated(t, plant)
+	waitForReconcileQuiescence(t)
+
+	requireNoFinalizers(t, plant)
 }
 
 // --- case 3: honest not-ready status, plus a clearly-separate ready path ---
@@ -184,13 +245,12 @@ func TestReconcile_DriftCorrection_DeploymentReplicasRestored(t *testing.T) {
 // resourceVersion cannot be trusted here. This lets the Plant settle,
 // resets the counting client's tallies, triggers exactly one more
 // reconcile, and asserts it performed zero Create/Update/Patch calls
-// against all five children AND zero status-subresource writes.
+// against all six children AND zero status-subresource writes.
 func TestReconcile_Idempotence_SteadyStateReconcileWritesNothing(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "idempotent", 3)
 	createPlant(t, plant)
 
-	waitForFinalizer(t, plant)
 	waitForChildrenExist(t, plant)
 	waitForStatusPopulated(t, plant)
 
@@ -207,8 +267,8 @@ func TestReconcile_Idempotence_SteadyStateReconcileWritesNothing(t *testing.T) {
 	triggerReconcile(t, plant)
 
 	// Sum every GVK the counting client has EVER seen a write against, not
-	// just the five expected children: a write storm on the Plant object
-	// itself (e.g. a finalizer re-add loop) or a write bucketed under some
+	// just the six expected children: a write storm on the Plant object
+	// itself (e.g. a status-condition loop) or a write bucketed under some
 	// unexpected GVK would be invisible to a loop that only inspects
 	// childGVKs(). The full map is still printed on failure so a non-zero
 	// total remains diagnosable.
@@ -242,7 +302,6 @@ func TestReconcile_Idempotence_CreateOrUpdateReturnsOperationResultNone(t *testi
 	plant := newTestPlant(ns, "steady", 3)
 	createPlant(t, plant)
 
-	waitForFinalizer(t, plant)
 	waitForChildrenExist(t, plant)
 	waitForStatusPopulated(t, plant)
 	waitForReconcileQuiescence(t)
@@ -289,6 +348,13 @@ func TestReconcile_Idempotence_CreateOrUpdateReturnsOperationResultNone(t *testi
 	})
 	require.NoError(t, err)
 	require.Equal(t, controllerutil.OperationResultNone, op, "ServiceAccount CreateOrUpdate must be a no-op at steady state")
+
+	networkPolicy := &networkingv1.NetworkPolicy{ObjectMeta: objectMeta(fresh.Name, fresh.Namespace)}
+	op, err = controllerutil.CreateOrUpdate(testCtx, testClient, networkPolicy, func() error {
+		return reconciler.mutateNetworkPolicy(fresh, networkPolicy)
+	})
+	require.NoError(t, err)
+	require.Equal(t, controllerutil.OperationResultNone, op, "NetworkPolicy CreateOrUpdate must be a no-op at steady state")
 }
 
 // TestComputeStatus_LastTransitionTimePreservedAcrossNoOpCall is case 5's
@@ -429,23 +495,28 @@ func TestReconcile_ObservedGenerationTracksMetadataGeneration(t *testing.T) {
 	}, 10*time.Second, 100*time.Millisecond, "status.observedGeneration never caught up to the new metadata.generation")
 }
 
-// --- case 9: deletion removes the finalizer; owner refs are the GC proof --
+// --- case 9: deletion is immediate; owner refs are the GC proof ----------
 
-// TestReconcile_DeleteRemovesFinalizerAndOwnerReferencesAreCorrect covers
-// deletion honestly: envtest runs no garbage-collector controller, so a
-// Plant's owned children are never actually removed here when the Plant is
-// -- only a real cluster's garbage collector does that, and it does it by
-// walking exactly the owner references this test asserts are correct
+// TestReconcile_DeleteIsImmediateAndOwnerReferencesAreCorrect covers deletion
+// honestly: envtest runs no garbage-collector controller, so a Plant's owned
+// children are never actually removed here when the Plant is -- only a real
+// cluster's garbage collector does that, and it does it by walking exactly
+// the owner references this test asserts are correct, on all SIX children,
 // before deleting. Asserting the children vanish under envtest would be
-// asserting something this suite's control plane cannot actually
-// demonstrate; Task 5's live-cluster verification is where cascading
-// deletion is proven for real.
-func TestReconcile_DeleteRemovesFinalizerAndOwnerReferencesAreCorrect(t *testing.T) {
+// asserting something this suite's control plane cannot demonstrate; CI's
+// live-cluster e2e job is where cascading deletion is proven for real.
+//
+// What this test CAN prove, and now does, is that deletion completes without
+// the operator having to do anything: with no finalizer on the object, the
+// API server removes the Plant on the delete call itself rather than parking
+// it with a DeletionTimestamp until a reconcile gets around to unblocking it.
+// The Eventually below used to be waiting for the operator; it now succeeds
+// on its first poll.
+func TestReconcile_DeleteIsImmediateAndOwnerReferencesAreCorrect(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 3)
 	createPlant(t, plant)
 
-	waitForFinalizer(t, plant)
 	waitForChildrenExist(t, plant)
 
 	owner := &buddyv1alpha1.Plant{}
@@ -471,13 +542,22 @@ func TestReconcile_DeleteRemovesFinalizerAndOwnerReferencesAreCorrect(t *testing
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, serviceAccount))
 	assertControllerOwnerRef(t, serviceAccount, owner)
 
+	networkPolicy := &networkingv1.NetworkPolicy{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, networkPolicy))
+	assertControllerOwnerRef(t, networkPolicy, owner)
+
 	require.NoError(t, testClient.Delete(testCtx, owner))
 
+	// No Eventually: with no finalizer to block it, the delete above has
+	// already completed by the time it returns. A require.Eventually here
+	// would still pass if a finalizer were reintroduced and the operator
+	// happened to be up to remove it -- which is exactly the availability
+	// dependency ADR 0007 removes, so the assertion is deliberately the
+	// stricter, non-polling one.
 	key := client.ObjectKeyFromObject(plant)
-	require.Eventually(t, func() bool {
-		got := &buddyv1alpha1.Plant{}
-		return apierrors.IsNotFound(testClient.Get(testCtx, key, got))
-	}, 10*time.Second, 100*time.Millisecond, "plant %s was never actually deleted", key)
+	got := &buddyv1alpha1.Plant{}
+	require.True(t, apierrors.IsNotFound(testClient.Get(testCtx, key, got)),
+		"plant %s must be gone the moment Delete returns; a Plant that lingers means something is holding a finalizer", key)
 }
 
 // --- case 10: two Plants in the same namespace don't interfere ------------

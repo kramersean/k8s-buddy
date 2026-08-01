@@ -1,7 +1,14 @@
 // Package controller implements the plant-operator's reconciliation logic:
 // turning a Plant into the Deployment, Service, ConfigMap,
-// PodDisruptionBudget, and ServiceAccount it should own, and keeping those
-// children in sync with its spec.
+// PodDisruptionBudget, ServiceAccount, and NetworkPolicy it should own, and
+// keeping those children in sync with its spec.
+//
+// This file is the Go twin of deploy/kustomize/base/*.yaml: the static
+// manifests Plan 1 ships describe the same buddy-api workload this operator
+// generates. Both are deliberately kept — see
+// docs/adr/0006-operator-reproduces-base-manifests.md for why, and
+// manifest_drift_test.go for the test that fails if the two ever disagree on
+// anything they are supposed to agree on.
 //
 // This file (resources.go) contains only the "desired state" builders: pure
 // functions from a *Plant to the child object it implies. There is no
@@ -18,6 +25,7 @@ package controller
 import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,8 +62,18 @@ const (
 	appName      = "buddy-api"
 	appComponent = "api"
 	appPartOf    = "k8s-buddy"
-	appManagedBy = "plant-operator"
+	appManagedBy = ManagedByValue
 )
+
+// ManagedByValue is the app.kubernetes.io/managed-by value every child this
+// operator generates carries. It is exported (unlike its three siblings
+// above) because it is not only a label this package writes: it is also the
+// selector cmd/plant-operator narrows the manager's informer cache with, so
+// the operator does not hold every ConfigMap and ServiceAccount in the
+// cluster in memory. Those two uses must agree exactly or the operator
+// caches nothing and reconciles nothing, so they share one constant rather
+// than two identical string literals in two packages.
+const ManagedByValue = "plant-operator"
 
 // Fixed shape of the generated pod spec: the workload's container name and
 // port, and the security/timing constants Plan 1's hardened deployment.yaml
@@ -68,6 +86,11 @@ const (
 	containerPort     = 8080
 
 	runAsUser = 65532
+
+	// dnsPortNumber is the port NetworkPolicyFor opens for egress to
+	// kube-system, on both UDP and TCP. Named rather than repeated as a
+	// bare 53 twice for the same reason containerPort is.
+	dnsPortNumber = 53
 
 	// terminationGracePeriodSeconds must stay comfortably above buddy-api's
 	// own shutdown sequence (BUDDY_SHUTDOWN_DELAY, default 5s, plus up to a
@@ -179,6 +202,16 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 					// pods call nothing in the Kubernetes API — but
 					// naming the account is what makes that a stated
 					// posture rather than an inherited default.
+					//
+					// mutateDeployment MUST copy this field onto the live
+					// object. It did not until the Plan 2 review caught
+					// it, and the result was exactly the failure this
+					// comment claimed did not happen: the ServiceAccount
+					// was created and garbage-collected correctly while
+					// every Pod actually ran as `default`. Only the pure
+					// builder was tested, so nothing failed. See
+					// mutateDeployment's own comment, and the envtest case
+					// that now asserts this on the LIVE child.
 					ServiceAccountName: p.Name,
 					// No token for these workload pods to use — they call
 					// nothing in the Kubernetes API.
@@ -454,6 +487,91 @@ func PodDisruptionBudgetFor(p *buddyv1alpha1.Plant) *policyv1.PodDisruptionBudge
 			MinAvailable: ptr.To(intstr.FromInt32(minAvailable)),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: SelectorFor(p),
+			},
+		},
+	}
+}
+
+// NetworkPolicyFor builds the sixth child: a single NetworkPolicy that gives
+// a Plant's own Pods the same network posture Plan 1's static
+// deploy/kustomize/base/networkpolicy.yaml gives buddy-api. It is named
+// exactly p.Name, in p.Namespace, and does not set an owner reference — see
+// DeploymentFor's comment for why.
+//
+// Plan 1 expresses that posture as THREE namespace-wide policies
+// (default-deny-all, allow-dns-egress, allow-http-ingress, all with
+// `podSelector: {}`). This operator deliberately expresses it as ONE
+// policy scoped to `SelectorFor(p)` instead, and the difference is not
+// cosmetic:
+//
+//   - A namespace-wide `podSelector: {}` policy is a claim over every Pod in
+//     the namespace, including Pods belonging to other Plants and to
+//     workloads this operator does not manage. Two Plants in one namespace
+//     would each own an identical namespace-wide policy and fight over it
+//     forever, and deleting either Plant would tear down the other's
+//     default-deny with it.
+//   - A NetworkPolicy is deny-by-default for every Pod it selects: selecting
+//     this Plant's Pods with both policyTypes declared means everything not
+//     listed below is already denied for them, with no separate
+//     default-deny object required. Scoping to the Plant loses nothing.
+//
+// The two holes opened are exactly Plan 1's two, for exactly Plan 1's
+// reasons:
+//
+//   - DNS egress to kube-system on UDP/53 and TCP/53 (TCP because Go's
+//     resolver falls back to it for truncated responses). Without it,
+//     default-deny breaks every outbound call at name resolution rather
+//     than at the destination.
+//   - Ingress on TCP 8080 with NO `from:` selector. That is deliberate and
+//     is the subject of docs/adr/0003: kube-proxy SNATs NodePort traffic to
+//     the node IP, so a podSelector-scoped `from:` silently black-holes the
+//     demo's only external traffic path — TCP connects and then hangs with
+//     no RST, which reads as an application bug rather than a policy denial.
+//     The blast radius is constrained on every axis that can be constrained
+//     portably: only this Plant's Pods are selected, only port 8080, and
+//     egress stays fully denied except for DNS.
+func NetworkPolicyFor(p *buddyv1alpha1.Plant) *networkingv1.NetworkPolicy {
+	udp := corev1.ProtocolUDP
+	tcp := corev1.ProtocolTCP
+	dnsPort := intstr.FromInt32(dnsPortNumber)
+	httpPort := intstr.FromInt32(containerPort)
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Labels:    LabelsFor(p),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: SelectorFor(p)},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					// No From: — see this function's doc comment and ADR 0003.
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: &httpPort},
+					},
+				},
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "kube-system",
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &udp, Port: &dnsPort},
+						{Protocol: &tcp, Port: &dnsPort},
+					},
+				},
 			},
 		},
 	}

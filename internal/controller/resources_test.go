@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -407,8 +408,64 @@ func TestDeterminism(t *testing.T) {
 	require.Equal(t, controller.ConfigMapFor(p), controller.ConfigMapFor(p))
 	require.Equal(t, controller.PodDisruptionBudgetFor(p), controller.PodDisruptionBudgetFor(p))
 	require.Equal(t, controller.ServiceAccountFor(p), controller.ServiceAccountFor(p))
+	require.Equal(t, controller.NetworkPolicyFor(p), controller.NetworkPolicyFor(p))
 	require.Equal(t, controller.LabelsFor(p), controller.LabelsFor(p))
 	require.Equal(t, controller.SelectorFor(p), controller.SelectorFor(p))
+}
+
+// TestNetworkPolicyFor is the sixth child. Plan 1's static path gets Pod
+// Security Admission's `restricted` profile AND a default-deny NetworkPolicy;
+// before this builder existed, a Plant got neither, which made
+// operator-managed workloads strictly LESS constrained than the static ones
+// they were meant to supersede -- while the project's own spec claimed the
+// security posture applied "to every workload without exception".
+func TestNetworkPolicyFor(t *testing.T) {
+	t.Parallel()
+
+	p := testPlant()
+	np := controller.NetworkPolicyFor(p)
+
+	require.Equal(t, "fernie", np.Name)
+	require.Equal(t, "k8s-buddy", np.Namespace)
+	require.Equal(t, controller.LabelsFor(p), np.Labels)
+
+	// Scoped to this Plant's own pods, NOT `podSelector: {}`. A
+	// namespace-wide policy would be a claim over every pod in the
+	// namespace, including other Plants' -- two Plants would fight over an
+	// identical object forever, and deleting either would tear down the
+	// other's default-deny with it.
+	require.Equal(t, controller.SelectorFor(p), np.Spec.PodSelector.MatchLabels)
+
+	// BOTH policy types. A NetworkPolicy is deny-by-default only for the
+	// directions it declares; omitting Egress here would leave outbound
+	// traffic completely unrestricted while looking like a lockdown.
+	require.ElementsMatch(t,
+		[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+		np.Spec.PolicyTypes)
+
+	// Ingress: exactly one rule, TCP 8080, no From. The missing From is
+	// deliberate and is the subject of ADR 0003 -- kube-proxy SNATs NodePort
+	// traffic to the node IP, so a podSelector-scoped From black-holes the
+	// demo's only external traffic path.
+	require.Len(t, np.Spec.Ingress, 1)
+	require.Empty(t, np.Spec.Ingress[0].From, "ADR 0003: an unqualified ingress rule is load-bearing here, not an oversight")
+	require.Len(t, np.Spec.Ingress[0].Ports, 1)
+	require.Equal(t, corev1.ProtocolTCP, *np.Spec.Ingress[0].Ports[0].Protocol)
+	require.Equal(t, intstr.FromInt32(8080), *np.Spec.Ingress[0].Ports[0].Port)
+
+	// Egress: DNS to kube-system only, on UDP AND TCP. TCP/53 is not
+	// optional -- Go's resolver falls back to it for truncated responses, so
+	// a UDP-only hole produces intermittent, size-dependent resolution
+	// failures rather than a clean break.
+	require.Len(t, np.Spec.Egress, 1)
+	require.Len(t, np.Spec.Egress[0].To, 1)
+	require.Equal(t, map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+		np.Spec.Egress[0].To[0].NamespaceSelector.MatchLabels)
+	require.Len(t, np.Spec.Egress[0].Ports, 2)
+	require.Equal(t, corev1.ProtocolUDP, *np.Spec.Egress[0].Ports[0].Protocol)
+	require.Equal(t, intstr.FromInt32(53), *np.Spec.Egress[0].Ports[0].Port)
+	require.Equal(t, corev1.ProtocolTCP, *np.Spec.Egress[0].Ports[1].Protocol)
+	require.Equal(t, intstr.FromInt32(53), *np.Spec.Egress[0].Ports[1].Port)
 }
 
 // TestServiceAccountFor is the fifth child (carried from Task 2's review):

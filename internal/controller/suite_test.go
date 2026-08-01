@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,7 +47,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -174,6 +174,11 @@ func runSuite(m *testing.M) int {
 	reconciler := &PlantReconciler{
 		Client: testCounting,
 		Scheme: testMgr.GetScheme(),
+		// The manager's uncached reader, exactly as cmd/plant-operator
+		// wires it. assertNotForeign is the only consumer, and giving it
+		// the real thing here is what lets the adoption-refusal case below
+		// exercise the same code path the deployed operator runs.
+		APIReader: testMgr.GetAPIReader(),
 		// PlantReconciler.Recorder (plant_controller.go, out of scope for
 		// this task) is typed record.EventRecorder, the old events API --
 		// GetEventRecorderFor is the only manager method that returns that
@@ -375,20 +380,25 @@ func updatePlant(t *testing.T, key client.ObjectKey, mutate func(*buddyv1alpha1.
 	return fresh
 }
 
-// waitForFinalizer polls until plant carries plantFinalizer.
-func waitForFinalizer(t *testing.T, plant *buddyv1alpha1.Plant) {
+// requireNoFinalizers asserts plant carries no finalizers at all.
+//
+// This operator adds none, deliberately -- see ADR 0007. The assertion is
+// "the list is empty", not "our particular string is absent", because the
+// failure this guards against is a finalizer being reintroduced under ANY
+// name: the liability is not the string, it is that a Plant becomes
+// undeletable whenever the operator is down, and nothing this operator owns
+// needs cleanup that garbage collection does not already perform.
+func requireNoFinalizers(t *testing.T, plant *buddyv1alpha1.Plant) {
 	t.Helper()
-	key := client.ObjectKeyFromObject(plant)
-	require.Eventually(t, func() bool {
-		got := &buddyv1alpha1.Plant{}
-		if err := testClient.Get(testCtx, key, got); err != nil {
-			return false
-		}
-		return controllerutil.ContainsFinalizer(got, plantFinalizer)
-	}, 10*time.Second, 100*time.Millisecond, "finalizer was never added to plant %s", key)
+	got := &buddyv1alpha1.Plant{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
+	require.Empty(t, got.Finalizers,
+		"plant %s/%s must carry no finalizers: children are removed by garbage collection via owner references, "+
+			"and a finalizer that cleans nothing only makes deletion depend on the operator being up (see ADR 0007)",
+		got.Namespace, got.Name)
 }
 
-// waitForChildrenExist polls until all five of plant's children exist.
+// waitForChildrenExist polls until all six of plant's children exist.
 func waitForChildrenExist(t *testing.T, plant *buddyv1alpha1.Plant) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -410,6 +420,9 @@ func childrenExist(plant *buddyv1alpha1.Plant) bool {
 		return false
 	}
 	if err := testClient.Get(testCtx, client.ObjectKey{Namespace: plant.Namespace, Name: plant.Name}, &corev1.ServiceAccount{}); err != nil {
+		return false
+	}
+	if err := testClient.Get(testCtx, client.ObjectKey{Namespace: plant.Namespace, Name: plant.Name}, &networkingv1.NetworkPolicy{}); err != nil {
 		return false
 	}
 	return true
