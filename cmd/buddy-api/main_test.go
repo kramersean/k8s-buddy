@@ -13,8 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sean-kramer/k8s-buddy/internal/api"
-	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
+	"github.com/kramersean/k8s-buddy/internal/api"
+	"github.com/kramersean/k8s-buddy/internal/telemetry"
 )
 
 // isReady is a small test helper that hits /readyz through the server's

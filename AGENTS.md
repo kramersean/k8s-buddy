@@ -22,7 +22,7 @@ least-privilege RBAC are all genuinely exercised, not simulated.
 
 ## The Four Components
 
-All Go, in a single module (`github.com/sean-kramer/k8s-buddy`):
+All Go, in a single module (`github.com/kramersean/k8s-buddy`):
 
 1. **buddy-api** — the plant itself. An HTTP service exposing `/healthz`,
    `/readyz`, `/status` (plant-themed mood JSON), `/work` (simulated load with

@@ -45,7 +45,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/sean-kramer/k8s-buddy/internal/chaos"
+	"github.com/kramersean/k8s-buddy/internal/chaos"
 )
 
 // version and commit are overridden at build time via

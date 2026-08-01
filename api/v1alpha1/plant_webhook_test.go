@@ -210,7 +210,7 @@ func TestDefault_LeavesExplicitValuesAlone(t *testing.T) {
 		Spec: PlantSpec{
 			Species:          "cactus",
 			Replicas:         &replicas,
-			Image:            "ghcr.io/sean-kramer/k8s-buddy/buddy-api:v1.2.3",
+			Image:            "ghcr.io/kramersean/k8s-buddy/buddy-api:v1.2.3",
 			ResourceProfile:  "large",
 			WateringInterval: metav1.Duration{Duration: 5 * time.Minute},
 			LatencyBudget:    metav1.Duration{Duration: 300 * time.Millisecond},
@@ -233,7 +233,7 @@ func fullySpecifiedPlant() *Plant {
 		Spec: PlantSpec{
 			Species:          "fern",
 			Replicas:         &replicas,
-			Image:            "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev",
+			Image:            "ghcr.io/kramersean/k8s-buddy/buddy-api:dev",
 			ResourceProfile:  "small",
 			WateringInterval: metav1.Duration{Duration: 30 * time.Second},
 			LatencyBudget:    metav1.Duration{Duration: 150 * time.Millisecond},
@@ -310,14 +310,14 @@ func TestImageRegistryAllowed(t *testing.T) {
 		image string
 		want  bool
 	}{
-		{"ghcr image", "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev", true},
+		{"ghcr image", "ghcr.io/kramersean/k8s-buddy/buddy-api:dev", true},
 		{"bare docker hub library image", "nginx:latest", true},
 		{"bare docker hub library image, no tag", "redis", true},
 		{"docker hub non-library org", "someuser/repo:tag", false},
 		{"explicit docker.io non-library", "docker.io/someuser/repo:tag", false},
 		{"localhost registry", "localhost:5000/buddy-api:dev", false},
 		{"disallowed third-party registry", "quay.io/someorg/buddy-api:dev", false},
-		{"ghcr with digest", "ghcr.io/sean-kramer/k8s-buddy/buddy-api@sha256:" + fortyTwoHexChars(), true},
+		{"ghcr with digest", "ghcr.io/kramersean/k8s-buddy/buddy-api@sha256:" + fortyTwoHexChars(), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

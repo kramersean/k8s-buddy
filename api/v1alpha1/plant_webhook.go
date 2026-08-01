@@ -102,7 +102,7 @@ const (
 	// DefaultReplicas mirrors PlantSpec.Replicas's +kubebuilder:default=3.
 	DefaultReplicas int32 = 3
 	// DefaultImage mirrors PlantSpec.Image's own +kubebuilder:default.
-	DefaultImage = "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev"
+	DefaultImage = "ghcr.io/kramersean/k8s-buddy/buddy-api:dev"
 	// DefaultResourceProfile mirrors PlantSpec.ResourceProfile's +kubebuilder:default=small.
 	DefaultResourceProfile = "small"
 	// DefaultWateringInterval mirrors PlantSpec.WateringInterval's

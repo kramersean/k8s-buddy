@@ -23,8 +23,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
-	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
+	"github.com/kramersean/k8s-buddy/internal/mood"
+	"github.com/kramersean/k8s-buddy/internal/telemetry"
 )
 
 // Config controls how a Server built by New behaves. cmd/buddy-api is

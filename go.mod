@@ -1,4 +1,4 @@
-module github.com/sean-kramer/k8s-buddy
+module github.com/kramersean/k8s-buddy
 
 go 1.26.0
 

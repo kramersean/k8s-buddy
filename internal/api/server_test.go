@@ -16,8 +16,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
-	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
+	"github.com/kramersean/k8s-buddy/internal/mood"
+	"github.com/kramersean/k8s-buddy/internal/telemetry"
 )
 
 // newTestServer builds a Server against a fresh registry and a discard

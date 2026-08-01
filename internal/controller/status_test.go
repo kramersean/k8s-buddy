@@ -13,8 +13,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
 // stubNow replaces the package-level now indirection with a clock fixed at

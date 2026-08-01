@@ -26,7 +26,7 @@ resources:
 # wrong for that target specifically (a rebuild with no tag change would
 # never trigger a rollout).
 images:
-  - name: ghcr.io/sean-kramer/k8s-buddy/chaos-buddy
+  - name: ghcr.io/kramersean/k8s-buddy/chaos-buddy
     newTag: dev
 
 # app.kubernetes.io/part-of and app.kubernetes.io/managed-by are already

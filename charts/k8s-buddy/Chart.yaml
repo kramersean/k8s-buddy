@@ -27,10 +27,10 @@ keywords:
   - controller-runtime
   - portfolio
 
-home: https://github.com/sean-kramer/k8s-buddy
+home: https://github.com/kramersean/k8s-buddy
 sources:
-  - https://github.com/sean-kramer/k8s-buddy
+  - https://github.com/kramersean/k8s-buddy
 
 maintainers:
   - name: Sean Kramer
-    url: https://github.com/sean-kramer
+    url: https://github.com/kramersean

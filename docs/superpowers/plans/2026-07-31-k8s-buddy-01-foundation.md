@@ -16,7 +16,7 @@ this one and are written after it lands.
 Every task must honor these. Values are exact — copy them verbatim, never paraphrase.
 
 **Module and toolchain**
-- Go module path: `github.com/sean-kramer/k8s-buddy`
+- Go module path: `github.com/kramersean/k8s-buddy`
   *(Assumption — the user's GitHub org/username was not specified. Task 1 must
   provide a `make rename-module MODULE=...` target so this is a one-command change.)*
 - `go.mod` declares `go 1.25.0` and contains **no** `toolchain` directive.
@@ -32,7 +32,7 @@ Every task must honor these. Values are exact — copy them verbatim, never para
 **Naming**
 - Kubernetes namespace: `k8s-buddy`
 - kind cluster name: `k8s-buddy`
-- Image repository prefix: `ghcr.io/sean-kramer/k8s-buddy`
+- Image repository prefix: `ghcr.io/kramersean/k8s-buddy`
 - Image names: `buddy-api`, `plant-operator`, `chaos-buddy`
 - API group (for Plan 2, fixed now so nothing drifts): `buddy.k8s-buddy.io`,
   version `v1alpha1`, Kind `Plant`, plural `plants`, shortName `pl`
@@ -189,7 +189,7 @@ func (s *Server) SetReady(ready bool)
 
 Create the Go module and the developer entry point.
 
-- `go mod init github.com/sean-kramer/k8s-buddy`. Add `github.com/stretchr/testify`
+- `go mod init github.com/kramersean/k8s-buddy`. Add `github.com/stretchr/testify`
   and `github.com/prometheus/client_golang` as dependencies.
 - **Makefile** is the single entry point; CI calls only Makefile targets so the two
   cannot drift. Required targets, each with a `##` comment for a `help` target that

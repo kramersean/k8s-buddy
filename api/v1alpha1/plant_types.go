@@ -57,7 +57,7 @@ type PlantSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*(:[a-zA-Z0-9][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$"
-	// +kubebuilder:default="ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev"
+	// +kubebuilder:default="ghcr.io/kramersean/k8s-buddy/buddy-api:dev"
 	Image string `json:"image,omitempty"`
 
 	// ResourceProfile selects the CPU and memory envelope applied to the

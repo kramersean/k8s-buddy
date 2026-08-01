@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
 )
 
 // This reconciler adds NO finalizer to a Plant, deliberately. Every child it

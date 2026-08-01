@@ -68,7 +68,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 ARG VERSION=dev
 ARG COMMIT=unknown
 
-LABEL org.opencontainers.image.source="https://github.com/sean-kramer/k8s-buddy" \
+LABEL org.opencontainers.image.source="https://github.com/kramersean/k8s-buddy" \
       org.opencontainers.image.title="plant-operator" \
       org.opencontainers.image.description="K8s Buddy's Kubernetes operator -- reconciles Plant custom resources into their owned Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount." \
       org.opencontainers.image.licenses="MIT" \

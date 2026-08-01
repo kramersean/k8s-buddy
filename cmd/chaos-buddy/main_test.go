@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sean-kramer/k8s-buddy/internal/chaos"
+	"github.com/kramersean/k8s-buddy/internal/chaos"
 )
 
 // chaosEnvKeys is every environment variable loadConfig or parseDryRunFlag

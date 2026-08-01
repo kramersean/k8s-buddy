@@ -84,10 +84,10 @@ spec:
           # overrides with the immutable git SHA of the build being
           # deployed. A mutable tag pinned here would make `kubectl apply
           # -k` a silent no-op after every rebuild.
-          image: ghcr.io/sean-kramer/k8s-buddy/buddy-api
+          image: ghcr.io/kramersean/k8s-buddy/buddy-api
           # IfNotPresent, not Always: this image is loaded directly into
           # kind's node containerd via `make kind-load` and is never
-          # pushed anywhere `ghcr.io/sean-kramer/k8s-buddy` could actually
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
           # resolve. imagePullPolicy: Always would make every pod start
           # fail trying (and failing) to pull from a registry that has
           # nothing at this tag.

@@ -69,7 +69,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 ARG VERSION=dev
 ARG COMMIT=unknown
 
-LABEL org.opencontainers.image.source="https://github.com/sean-kramer/k8s-buddy" \
+LABEL org.opencontainers.image.source="https://github.com/kramersean/k8s-buddy" \
       org.opencontainers.image.title="chaos-buddy" \
       org.opencontainers.image.description="K8s Buddy's controlled failure injector -- deletes or flaps the readiness of one pod at a time, gated by a kill switch, a dry-run default, and narrowly-scoped RBAC." \
       org.opencontainers.image.licenses="MIT" \

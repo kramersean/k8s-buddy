@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
+	"github.com/kramersean/k8s-buddy/internal/telemetry"
 )
 
 // unmatchedRoutePattern is the stable placeholder the metrics middleware

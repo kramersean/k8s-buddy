@@ -10,8 +10,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
-	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
+	"github.com/kramersean/k8s-buddy/internal/mood"
+	"github.com/kramersean/k8s-buddy/internal/telemetry"
 )
 
 // testBuildInfo is a fixed BuildInfo used across tests so expected label

@@ -2,10 +2,10 @@
 
 A Kubernetes operator, in the shape of a talking plant, that proves it understands the control plane rather than just YAML.
 
-[![CI](https://github.com/sean-kramer/k8s-buddy/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/sean-kramer/k8s-buddy/actions/workflows/ci.yaml)
+[![CI](https://github.com/kramersean/k8s-buddy/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/kramersean/k8s-buddy/actions/workflows/ci.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> The repository is not yet pushed to `github.com/sean-kramer/k8s-buddy`, so the badges above will 404 until it is — that's expected, not a defect in this README.
+> The repository is not yet pushed to `github.com/kramersean/k8s-buddy`, so the badges above will 404 until it is — that's expected, not a defect in this README.
 
 K8s Buddy turns a simulated "plant" workload into a Kubernetes `Custom Resource`: applying a `Plant` manifest causes a purpose-built operator to create and continuously reconcile a Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount, NetworkPolicy, and (when Prometheus is installed) a ServiceMonitor, then report the workload's aggregate mood and health back onto `Plant.status`. A narrowly-RBAC'd chaos injector wilts the plant on command, and Kubernetes — not this project's own code — brings it back, with Prometheus, Grafana, and Loki recording the whole arc. It demonstrates CRDs with OpenAPI/CEL validation, controller-runtime reconciliation with owner-reference garbage collection, admission webhooks, least-privilege RBAC, and multi-window SLO alerting as genuinely exercised properties of a running cluster, not claims in a slide deck.
 
@@ -81,7 +81,7 @@ Every command below is one that was actually run, on this machine, against this 
 ### 1. Clone and build the headline demo
 
 ```bash
-git clone https://github.com/sean-kramer/k8s-buddy.git
+git clone https://github.com/kramersean/k8s-buddy.git
 cd k8s-buddy
 make demo-operator
 ```

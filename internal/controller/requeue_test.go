@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
 )
 
 // TestRequeueIntervalFor covers both failure modes minRequeueInterval guards,

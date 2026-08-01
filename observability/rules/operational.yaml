@@ -41,7 +41,7 @@ groups:
             least 5 minutes. Run `kubectl -n {{ $labels.namespace }} describe
             plant {{ $labels.plant }}` to see the condition's message and
             recent Events.
-          runbook_url: "https://github.com/sean-kramer/k8s-buddy/blob/main/docs/runbook/README.md#plantdegraded"
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#plantdegraded"
 
       # "No successful reconcile in 5m" is interpreted as "no NON-ERROR
       # reconcile in 5m", not literally result="success" -- and that
@@ -94,7 +94,7 @@ groups:
             stuck, or every reconcile is erroring (check
             controller_runtime_reconcile_total{controller="plant",result="error"}
             and the pod's own logs).
-          runbook_url: "https://github.com/sean-kramer/k8s-buddy/blob/main/docs/runbook/README.md#plantnotreconciling"
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#plantnotreconciling"
 
       # chaos-buddy's default CHAOS_INTERVAL is 30s (see
       # deploy/kustomize/chaos/configmap.yaml), and it performs at most ONE
@@ -133,4 +133,4 @@ groups:
             chaos-buddy-switch --type=merge -p '{"data":{"enabled":"false"}}'`)
             and inspect chaos-buddy's CHAOS_INTERVAL and logs before
             re-enabling.
-          runbook_url: "https://github.com/sean-kramer/k8s-buddy/blob/main/docs/runbook/README.md#chaosrunawaydeletions"
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#chaosrunawaydeletions"

@@ -6,7 +6,7 @@ domain: k8s-buddy.io
 layout:
 - go.kubebuilder.io/v4
 projectName: k8s-buddy
-repo: github.com/sean-kramer/k8s-buddy
+repo: github.com/kramersean/k8s-buddy
 resources:
 - api:
     crdVersion: v1
@@ -15,6 +15,6 @@ resources:
   domain: k8s-buddy.io
   group: buddy
   kind: Plant
-  path: github.com/sean-kramer/k8s-buddy/api/v1alpha1
+  path: github.com/kramersean/k8s-buddy/api/v1alpha1
   version: v1alpha1
 version: "3"

@@ -20,7 +20,7 @@ new, numbered ADR that says so), not silently worked around.
 ## Local setup
 
 ```bash
-git clone https://github.com/sean-kramer/k8s-buddy.git
+git clone https://github.com/kramersean/k8s-buddy.git
 cd k8s-buddy
 make tools     # installs golangci-lint, controller-gen, setup-envtest into .tools/, pinned versions
 make build     # compiles every ./cmd/* binary

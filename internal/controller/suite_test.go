@@ -56,7 +56,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
 )
 
 // envtestK8sVersion pins the Kubernetes control-plane version this suite
@@ -421,7 +421,7 @@ func newTestPlant(namespace, name string, replicas int32) *buddyv1alpha1.Plant {
 		Spec: buddyv1alpha1.PlantSpec{
 			Species:          "fern",
 			Replicas:         int32Ptr(replicas),
-			Image:            "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev",
+			Image:            "ghcr.io/kramersean/k8s-buddy/buddy-api:dev",
 			ResourceProfile:  "small",
 			WateringInterval: metav1.Duration{Duration: 10 * time.Minute},
 			LatencyBudget:    metav1.Duration{Duration: 150 * time.Millisecond},

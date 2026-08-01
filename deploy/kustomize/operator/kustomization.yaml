@@ -25,7 +25,7 @@ resources:
 # gets, matching the second tag `make docker-build-operator`/
 # `make kind-load-operator` produce.
 images:
-  - name: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+  - name: ghcr.io/kramersean/k8s-buddy/plant-operator
     newTag: dev
 
 labels:

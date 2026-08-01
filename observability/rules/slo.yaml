@@ -93,7 +93,7 @@ groups:
             this rate the entire 30-day, 99%-availability error budget is
             exhausted in about 2 days. Current 5m ratio:
             {{ printf "%.4f" $value }}.
-          runbook_url: "https://github.com/sean-kramer/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnpage"
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnpage"
 
       # 6 * (1 - 0.99) = 0.06.
       - alert: BuddyAPIWorkErrorBudgetBurnTicket
@@ -113,4 +113,4 @@ groups:
             exhausted in about 5 days -- slower and less severe than the page
             alert, file a ticket rather than paging. Current 30m ratio:
             {{ printf "%.4f" $value }}.
-          runbook_url: "https://github.com/sean-kramer/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnticket"
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnticket"

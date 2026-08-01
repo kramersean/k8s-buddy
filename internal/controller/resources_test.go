@@ -13,8 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/controller"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/controller"
 )
 
 // testPlant returns a fully-populated, fully-defaulted Plant, as if the CRD's
@@ -31,7 +31,7 @@ func testPlant() *buddyv1alpha1.Plant {
 		Spec: buddyv1alpha1.PlantSpec{
 			Species:          "fern",
 			Replicas:         &replicas,
-			Image:            "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev",
+			Image:            "ghcr.io/kramersean/k8s-buddy/buddy-api:dev",
 			ResourceProfile:  "small",
 			WateringInterval: metav1.Duration{Duration: 30 * time.Second},
 			LatencyBudget:    metav1.Duration{Duration: 150 * time.Millisecond},

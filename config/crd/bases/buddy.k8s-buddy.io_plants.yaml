@@ -82,7 +82,7 @@ spec:
                     type: boolean
                 type: object
               image:
-                default: ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev
+                default: ghcr.io/kramersean/k8s-buddy/buddy-api:dev
                 description: |-
                   Image is the buddy-api container image the generated Deployment runs,
                   including its tag.

@@ -11,7 +11,7 @@ tests:
           of: Deployment
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/sean-kramer/k8s-buddy/plant-operator:dev
+          value: ghcr.io/kramersean/k8s-buddy/plant-operator:dev
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent

@@ -74,7 +74,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 ARG VERSION=dev
 ARG COMMIT=unknown
 
-LABEL org.opencontainers.image.source="https://github.com/sean-kramer/k8s-buddy" \
+LABEL org.opencontainers.image.source="https://github.com/kramersean/k8s-buddy" \
       org.opencontainers.image.title="buddy-api" \
       org.opencontainers.image.description="K8s Buddy's HTTP service -- the component Kubernetes probes, chaos experiments target, and Prometheus scrapes." \
       org.opencontainers.image.licenses="MIT" \

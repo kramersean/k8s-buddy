@@ -22,8 +22,8 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/sean-kramer/k8s-buddy/buddy-api
-  OPERATOR_IMAGE: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+  IMAGE: ghcr.io/kramersean/k8s-buddy/buddy-api
+  OPERATOR_IMAGE: ghcr.io/kramersean/k8s-buddy/plant-operator
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -655,7 +655,7 @@ jobs:
           image="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.image}')"
           replicas="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.replicas}')"
           watering="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.wateringInterval}')"
-          if [ "$image" != "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev" ] || [ "$replicas" != "3" ] || [ "$watering" != "30s" ]; then
+          if [ "$image" != "ghcr.io/kramersean/k8s-buddy/buddy-api:dev" ] || [ "$replicas" != "3" ] || [ "$watering" != "30s" ]; then
             echo "defaults were not fully applied: image=$image replicas=$replicas wateringInterval=$watering" >&2
             exit 1
           fi

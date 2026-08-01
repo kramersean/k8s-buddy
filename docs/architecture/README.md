@@ -6,7 +6,7 @@ quickstart; this document explains *how* the pieces actually work, for the
 reader who is about to open `internal/controller/` or `api/v1alpha1/` and
 wants a map first.
 
-Four components, one Go module (`github.com/sean-kramer/k8s-buddy`):
+Four components, one Go module (`github.com/kramersean/k8s-buddy`):
 
 - **buddy-api** (`cmd/buddy-api`) — the plant itself, an HTTP service.
 - **plant-operator** (`cmd/plant-operator`) — the controller-runtime operator

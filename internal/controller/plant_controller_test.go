@@ -24,8 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
 // --- case 1: creation owns all six children -----------------------------

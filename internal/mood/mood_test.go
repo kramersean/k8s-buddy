@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
+	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
 func TestFromScore_Boundaries(t *testing.T) {

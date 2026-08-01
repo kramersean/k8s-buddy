@@ -32,7 +32,7 @@ resources:
 # its peers keep the old image, producing a version-skewed Deployment with
 # no visible signal that anything is wrong.
 images:
-  - name: ghcr.io/sean-kramer/k8s-buddy/buddy-api
+  - name: ghcr.io/kramersean/k8s-buddy/buddy-api
     newTag: dev
 
 # app.kubernetes.io/part-of and app.kubernetes.io/managed-by are already set

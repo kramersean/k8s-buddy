@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
 )
 
 // --- refusing to adopt a pre-existing, unowned object --------------------
@@ -349,9 +349,9 @@ func TestPlantAdmission_RejectsMalformedImage(t *testing.T) {
 	// see TestPlantAdmission_ImagePatternValidButRegistryDisallowed below
 	// for why it moved out, and for what it proves instead.
 	for _, image := range []string{
-		"ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev",
+		"ghcr.io/kramersean/k8s-buddy/buddy-api:dev",
 		"buddy-api",
-		"ghcr.io/sean-kramer/k8s-buddy/buddy-api@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/kramersean/k8s-buddy/buddy-api@sha256:" + strings.Repeat("a", 64),
 	} {
 		t.Run("accepts "+image, func(t *testing.T) {
 			plant := newTestPlant(ns, "goodimage", 3)

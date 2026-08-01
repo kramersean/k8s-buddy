@@ -111,7 +111,7 @@ type PlantSpec struct {
     Replicas *int32 `json:"replicas,omitempty"`
 
     // Image is the buddy-api container image to run.
-    // +kubebuilder:default="ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev"
+    // +kubebuilder:default="ghcr.io/kramersean/k8s-buddy/buddy-api:dev"
     Image string `json:"image,omitempty"`
 
     // ResourceProfile selects the CPU/memory envelope.

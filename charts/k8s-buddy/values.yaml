@@ -27,7 +27,7 @@ namespace:
   create: true
 
 image:
-  repository: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+  repository: ghcr.io/kramersean/k8s-buddy/plant-operator
   # Untagged by default, same convention every kustomize manifest in this
   # repo uses (see deploy/kustomize/operator/kustomization.yaml): "dev" here
   # is a placeholder a real install always overrides, either via

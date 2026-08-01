@@ -21,8 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
 // Condition types and reasons for Plant status, per the operator plan's

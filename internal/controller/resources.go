@@ -37,7 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
 )
 
 // The five standard app.kubernetes.io labels applied to every child this

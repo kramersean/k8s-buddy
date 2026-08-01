@@ -69,7 +69,7 @@ GIT_SHA  := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 COMMIT   := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 VERSION  ?= $(GIT_SHA)
 
-IMAGE_PREFIX := ghcr.io/sean-kramer/k8s-buddy
+IMAGE_PREFIX := ghcr.io/kramersean/k8s-buddy
 IMAGE_NAME   := buddy-api
 IMAGE        := $(IMAGE_PREFIX)/$(IMAGE_NAME):$(GIT_SHA)
 IMAGE_DEV    := $(IMAGE_PREFIX)/$(IMAGE_NAME):dev

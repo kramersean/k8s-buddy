@@ -56,10 +56,10 @@ spec:
           # deployment.yaml: the tag comes from the `images:` transformer in
           # kustomization.yaml, which `make deploy-operator` overrides with
           # the immutable git SHA of the build being deployed.
-          image: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+          image: ghcr.io/kramersean/k8s-buddy/plant-operator
           # IfNotPresent, not Always: this image is loaded directly into
           # kind's node containerd via `make kind-load-operator` and is never
-          # pushed anywhere `ghcr.io/sean-kramer/k8s-buddy` could actually
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
           # resolve.
           imagePullPolicy: IfNotPresent
           args:

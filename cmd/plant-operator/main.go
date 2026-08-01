@@ -37,8 +37,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/controller"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/controller"
 )
 
 // version and commit are overridden at build time via

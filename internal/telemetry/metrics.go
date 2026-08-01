@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/sean-kramer/k8s-buddy/internal/mood"
+	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
 // BuildInfo carries the version, commit, and Go runtime version reported by

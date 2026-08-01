@@ -36,8 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
 
-	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
-	"github.com/sean-kramer/k8s-buddy/internal/controller"
+	buddyv1alpha1 "github.com/kramersean/k8s-buddy/api/v1alpha1"
+	"github.com/kramersean/k8s-buddy/internal/controller"
 )
 
 // baseManifestDir is deploy/kustomize/base, relative to this package's own
@@ -273,7 +273,7 @@ func TestDrift_DeploymentDifferencesAreDeliberate(t *testing.T) {
 	// images: transformer, which `make deploy` overrides with an immutable
 	// git SHA. The operator takes the image from spec.image, whose CRD
 	// default carries a tag.
-	require.Equal(t, "ghcr.io/sean-kramer/k8s-buddy/buddy-api", static.Spec.Template.Spec.Containers[0].Image,
+	require.Equal(t, "ghcr.io/kramersean/k8s-buddy/buddy-api", static.Spec.Template.Spec.Containers[0].Image,
 		"the static manifest must stay untagged; the tag comes from the kustomize images: transformer")
 	require.Equal(t, plant.Spec.Image, generated.Spec.Template.Spec.Containers[0].Image)
 

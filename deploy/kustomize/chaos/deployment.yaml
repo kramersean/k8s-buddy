@@ -50,10 +50,10 @@ spec:
           # in this repo: the tag comes from the `images:` transformer in
           # kustomization.yaml, which `make deploy-chaos` overrides with
           # the immutable git SHA of the build being deployed.
-          image: ghcr.io/sean-kramer/k8s-buddy/chaos-buddy
+          image: ghcr.io/kramersean/k8s-buddy/chaos-buddy
           # IfNotPresent, not Always: this image is loaded directly into
           # kind's node containerd via `make kind-load-chaos` and is never
-          # pushed anywhere `ghcr.io/sean-kramer/k8s-buddy` could actually
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
           # resolve.
           imagePullPolicy: IfNotPresent
           ports:
