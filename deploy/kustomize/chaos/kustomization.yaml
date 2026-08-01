@@ -15,6 +15,7 @@ resources:
   - rbac.yaml
   - configmap.yaml
   - deployment.yaml
+  - service.yaml
 
 # The `dev` default matches the second tag `make docker-build-chaos`/
 # `make kind-load-chaos` produce, so this directory is still directly

@@ -1,0 +1,28 @@
+# chaos-buddy's metrics Service, fronting the "metrics" containerPort (8080)
+# deployment.yaml already exposes. Closes the "add a metrics Service for
+# chaos-buddy's :8080" item from Plan 3 Task 2 -- see
+# deploy/observability/servicemonitor-chaos.yaml for the object that tells
+# Prometheus to scrape it (its own comment explains why chaos-buddy's
+# endpoint stays unauthenticated, unlike plant-operator's).
+apiVersion: v1
+kind: Service
+metadata:
+  name: chaos-buddy-metrics
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

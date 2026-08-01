@@ -1,0 +1,29 @@
+# The operator's own metrics Service, closing the last item carried out of
+# Plan 2 (see docs/adr/0008-deferred-to-plan-3.md and
+# cmd/plant-operator/main.go's filters.WithAuthenticationAndAuthorization
+# wiring). Fronts the operator Deployment's "metrics" containerPort (8081),
+# which now serves over HTTPS with authn/authz enforced -- servicemonitor.yaml
+# in this same directory is what tells Prometheus to scrape it, and how to
+# authenticate.
+apiVersion: v1
+kind: Service
+metadata:
+  name: plant-operator-metrics
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+      protocol: TCP

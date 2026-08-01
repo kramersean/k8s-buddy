@@ -13,6 +13,7 @@ resources:
   - namespace.yaml
   - ../../../config/rbac
   - deployment.yaml
+  - service.yaml
 
 # See deploy/kustomize/base/kustomization.yaml's own comment for why this
 # exists at all: `make deploy-operator` overrides newTag with the immutable
