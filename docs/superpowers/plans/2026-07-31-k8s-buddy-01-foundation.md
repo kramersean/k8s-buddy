@@ -325,7 +325,7 @@ third-party router.
 `cmd/buddy-api/main.go`:
 - Config from environment with defaults: `BUDDY_NAME` (`fernie`), `BUDDY_SPECIES`
   (`fern`), `BUDDY_PORT` (`8080`), `BUDDY_LOG_LEVEL` (`info`),
-  `BUDDY_LATENCY_BUDGET` (`250ms`), `BUDDY_WORK_ERROR_RATE` (`0.05`),
+  `BUDDY_LATENCY_BUDGET` (`150ms`), `BUDDY_WORK_ERROR_RATE` (`0.05`),
   `BUDDY_WORK_MIN_DELAY` (`10ms`), `BUDDY_WORK_MAX_DELAY` (`200ms`),
   `BUDDY_ENABLE_CHAOS_ENDPOINTS` (`false`). Invalid values are a startup error with
   a clear message, never a silent fallback.
@@ -419,14 +419,14 @@ and `kubectl get nodes` shows 3 `Ready`; `make kind-load` succeeds.
   `demo` (= `kind-up` → `docker-build` → `kind-load` → `deploy` → wait for rollout
   → `hack/demo.sh`), `status`, `logs`.
 
-**Graceful-shutdown verification (added after Task 4).** Windows cannot deliver a
-real SIGTERM to a console-less child process, so Task 4 could not exercise the
-shutdown path end to end. Linux containers can, and `kubectl delete pod` sends a
-genuine SIGTERM — so this task is where that behavior gets proven. Capture the
-terminating pod's logs during deletion and confirm the phases appear in order:
-readiness flipped false → shutdown delay elapsed → server drained → exit. Paste
-the log lines into the report. If the ordering is wrong, or a phase is missing,
-that is a Critical finding against Task 4, not a Task 6 defect.
+**Graceful-shutdown verification.** Task 4 carries the permanent regression test
+(`cmd/buddy-api/main_test.go`), which exercises `gracefulShutdown` directly with a
+parameterized delay and needs no signal. This task adds the *live* confirmation:
+`kubectl delete pod` sends a genuine SIGTERM to a Linux container, so capture the
+terminating pod's logs and confirm the phases appear in order — readiness flipped
+false → shutdown delay elapsed → server drained → exit. Paste the log lines into
+the report. The unit test guards against reordering; this observation proves it
+behaves the same under a real kubelet.
 
 **Verify (run these for real, do not assume):**
 `kubectl apply -k deploy/kustomize/base --dry-run=client` clean;
