@@ -474,5 +474,10 @@ invokes a Makefile target that actually exists.
 ## Out of scope for Plan 1
 
 The Plant CRD and operator (Plan 2); chaos-buddy, Prometheus/Grafana/Loki, the
-Helm chart, Kustomize overlays, admission webhooks, the CI e2e job, and the
-README/ADR/runbook set (Plan 3). Do not build ahead.
+Helm chart, Kustomize overlays, admission webhooks, and the README/ADR/runbook
+set (Plan 3). Do not build ahead.
+
+*(Corrected during Task 7: an earlier draft listed "the CI e2e job" here while
+Task 7 treats it as its centerpiece. Task 7 governs — the e2e job that injects
+chaos and asserts recovery belongs to Plan 1, because a demo the repository does
+not test is a claim rather than a property.)*
