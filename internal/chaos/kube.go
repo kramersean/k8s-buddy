@@ -164,9 +164,10 @@ func (c *Client) FlapReadiness(ctx context.Context, pod PodRef, window time.Dura
 	if err := postReadiness(ctx, c.http, url, false); err != nil {
 		return fmt.Errorf(
 			"readiness-flap: set pod %s/%s unready: %w (this endpoint only exists when the target's own "+
-				"BUDDY_ENABLE_CHAOS_ENDPOINTS=true; it is false in this project's shipped Plant ConfigMap -- "+
-				"see internal/controller/resources.go's ConfigMapFor -- so readiness-flap will fail loudly "+
-				"exactly like this against an unmodified deployment)",
+				"BUDDY_ENABLE_CHAOS_ENDPOINTS=true; that's driven by the target Plant's spec.chaos.enableEndpoints "+
+				"-- see api/v1alpha1/plant_types.go's ChaosSpec and internal/controller/resources.go's ConfigMapFor "+
+				"-- and defaults to false, so readiness-flap will fail loudly exactly like this against a Plant "+
+				"that has not opted in)",
 			pod.Namespace, pod.Name, err,
 		)
 	}

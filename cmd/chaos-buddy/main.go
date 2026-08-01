@@ -41,6 +41,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -362,6 +363,22 @@ func parseDryRunFlag(args []string) (bool, error) {
 // default at all -- an unset required variable, or an empty label
 // selector, is always a startup error naming exactly what is wrong,
 // never an implicit "match everything" or "do nothing safely."
+//
+// CHAOS_LABEL_SELECTOR gets two checks, not one: chaos.ValidateLabelSelector
+// (internal/chaos/engine.go) rejects an empty/whitespace-only selector, and
+// labels.Parse below additionally rejects one that is non-empty but
+// syntactically invalid (e.g. "===not a selector==="). The second check
+// lives here, in main.go, rather than in the pure engine package, because
+// it requires k8s.io/apimachinery/pkg/labels -- engine.go stays free of
+// every Kubernetes import so it can be unit-tested without a cluster; this
+// file already imports client-go for the real client, so it is the right
+// place for a k8s-API-shaped validation. Without it, a typo'd selector
+// would still start the process cleanly and then fail identically on every
+// single loop iteration forever (ListPods returning a "not a valid
+// selector" error) -- fail-safe (Decide would never see a candidate list at
+// all, so it could never act on the wrong pods) but not fail-fast, so a
+// misconfigured chaos-buddy would sit in a crash-free but useless loop
+// instead of refusing to start with an actionable error.
 func loadConfig(dryRun bool) (config, error) {
 	targetNamespace, ok := os.LookupEnv("CHAOS_TARGET_NAMESPACE")
 	if !ok || strings.TrimSpace(targetNamespace) == "" {
@@ -371,6 +388,9 @@ func loadConfig(dryRun bool) (config, error) {
 	labelSelector := getEnv("CHAOS_LABEL_SELECTOR", "")
 	if err := chaos.ValidateLabelSelector(labelSelector); err != nil {
 		return config{}, err
+	}
+	if _, err := labels.Parse(labelSelector); err != nil {
+		return config{}, fmt.Errorf("invalid CHAOS_LABEL_SELECTOR: %q is not a valid label selector: %w", labelSelector, err)
 	}
 
 	modeStr := getEnv("CHAOS_MODE", string(chaos.ModePodKill))
