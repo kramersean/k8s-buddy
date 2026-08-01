@@ -39,8 +39,19 @@ Binding. Copy values verbatim; never paraphrase.
 cluster (Kubernetes 1.36.1) and pin them exactly in `go.mod`:
 `k8s.io/api`, `k8s.io/apimachinery`, `k8s.io/client-go` at `v0.36.x`, and
 `sigs.k8s.io/controller-runtime` at the release whose own `go.mod` requires that
-`v0.36.x` line. Record the resolved versions in the task report. `go.mod` keeps
-`go 1.25.0` and gains no `toolchain` directive.
+`v0.36.x` line. Record the resolved versions in the task report.
+
+`go.mod` declares **`go 1.26.0`** and gains no `toolchain` directive.
+*(Amended during Task 1. The constraint originally said `go 1.25.0`, inherited
+from Plan 1. `k8s.io/apimachinery v0.36.3` declares `go 1.26.0` as its own
+minimum — Kubernetes 1.36 is built with Go 1.26 — so the build fails outright
+once apimachinery is imported. Verified empirically, not assumed. This is the
+second time a dependency has forced the `go` directive upward; the value is
+dictated by the dependency tree, not chosen.)*
+
+Resolved and pinned in Task 1: `k8s.io/api`, `k8s.io/apimachinery`,
+`k8s.io/client-go` at `v0.36.3`; `sigs.k8s.io/controller-runtime` at `v0.24.1`;
+`controller-gen` at `v0.21.0`.
 
 **Pinned tools**, downloaded into `.tools/` by Makefile targets, never `@latest`:
 `controller-gen`, `setup-envtest`. Follow the existing `golangci-lint` pattern
