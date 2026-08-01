@@ -35,3 +35,6 @@ kubeconfig.*
 charts/**/charts/
 charts/**/Chart.lock
 *.tgz
+
+# SDD orchestration scratch (ledger, briefs, review packages)
+.superpowers/
