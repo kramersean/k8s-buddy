@@ -277,6 +277,16 @@ install-crd: manifests ## Apply the generated Plant CRD (config/crd/bases) to th
 uninstall-crd: ## Remove the Plant CRD from the current kubectl context (also deletes every Plant on the cluster)
 	kubectl delete -f $(CRD_DIR) --ignore-not-found
 
+# newTag is QUOTED in the generated overlays below (here and in
+# `deploy-operator`). A git short SHA is seven hex digits, and roughly one
+# commit in 27 draws seven that happen to be all decimal -- at which point
+# unquoted YAML parses the tag as a NUMBER and kustomize fails the apply
+# outright with "cannot unmarshal number into Go struct field
+# Image.images.newTag of type string". Observed on commit 2090846, which broke
+# `make deploy-operator` on a tree where nothing about the deploy path had
+# changed. The bug is invisible on ~96% of commits, which is exactly what
+# makes it worth pinning here rather than rediscovering.
+#
 # `deploy` never applies the base directly. The base's images: transformer
 # defaults to the MUTABLE :dev tag, and applying a mutable tag after a
 # rebuild renders a byte-identical PodSpec: the pod-template hash does not
@@ -308,7 +318,7 @@ deploy: ## Apply the Kubernetes manifests, pinning the image to the immutable gi
 		'  - ../../$(DEPLOY_BASE)' \
 		'images:' \
 		'  - name: $(IMAGE_PREFIX)/$(IMAGE_NAME)' \
-		'    newTag: $(GIT_SHA)' \
+		'    newTag: "$(GIT_SHA)"' \
 		> $(DEPLOY_BUILD_DIR)/kustomization.yaml
 	@echo "deploy: pinning $(IMAGE_PREFIX)/$(IMAGE_NAME) to tag $(GIT_SHA)"
 	kubectl apply -k $(DEPLOY_BUILD_DIR)
@@ -340,7 +350,7 @@ deploy-operator: install-crd docker-build-operator kind-load-operator ## Apply t
 		'  - ../../$(OPERATOR_BASE)' \
 		'images:' \
 		'  - name: $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME)' \
-		'    newTag: $(GIT_SHA)' \
+		'    newTag: "$(GIT_SHA)"' \
 		> $(OPERATOR_BUILD_DIR)/kustomization.yaml
 	@echo "deploy-operator: pinning $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME) to tag $(GIT_SHA)"
 	kubectl apply -k $(OPERATOR_BUILD_DIR)
