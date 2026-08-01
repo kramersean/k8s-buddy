@@ -101,7 +101,7 @@ func TestReconcile_RefusesToAdoptForeignDeployment(t *testing.T) {
 // regression case for the guard above, and it asserts the OPPOSITE outcome
 // from its own test's namesake -- which is exactly why both have to exist.
 //
-// The first version of assertNotForeign checked the
+// The first version of the ownership check ran assertNotForeign, which read the
 // app.kubernetes.io/managed-by label BEFORE the controller owner reference,
 // and refused unconditionally on a mismatch. That made one kubectl command --
 //
@@ -121,6 +121,20 @@ func TestReconcile_RefusesToAdoptForeignDeployment(t *testing.T) {
 // TestReconcile_RefusesToAdoptForeignDeployment must keep passing alongside
 // this: an object with NEITHER a matching owner reference NOR the label is
 // still somebody else's, and is still refused.
+//
+// HONEST LIMITATION, worth stating because it bit exactly here. Reordering
+// the checks was only HALF the fix, and this test cannot see the other half.
+// The deployed operator narrows its informer cache by that same managed-by
+// label; this suite's manager does not (it sets no cache.Options at all). So
+// on a live cluster a de-labelled child also vanishes from the cache, a
+// CACHED read reports NotFound, and CreateOrUpdate tried to create an object
+// that already exists -- `deployments.apps "fernie" already exists`, on
+// backoff, forever -- with the label still never restored. This test passed
+// against that broken build. applyChild reading through the uncached
+// APIReader is what actually closes it, and the live-cluster check recorded
+// in the task report is what proves it; a faithful envtest reproduction would
+// need this suite to mirror the deployed cache configuration, which is
+// noted as follow-up work rather than done here.
 func TestReconcile_RestoresStrippedManagedByLabelWithoutDegrading(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "relabelled", 3)

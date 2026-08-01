@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,7 +111,7 @@ const (
 	ReasonInvalidName = "InvalidName"
 	// ReasonConflictingResource is Degraded=True because an object of the
 	// same name and kind already exists in the namespace and is not managed
-	// by this operator. See assertNotForeign.
+	// by this operator. See assertOwnership.
 	ReasonConflictingResource = "ConflictingResource"
 )
 
@@ -127,26 +128,30 @@ type PlantReconciler struct {
 	// Recorder emits the Events described above against the Plant being
 	// reconciled.
 	Recorder record.EventRecorder
-	// APIReader is a direct, UNCACHED reader (manager.GetAPIReader()), used
-	// by assertNotForeign and nowhere else.
+	// APIReader is a direct, UNCACHED reader (manager.GetAPIReader()). Every
+	// read applyChild makes goes through it; nothing else in this file uses
+	// it.
 	//
-	// It has to be uncached, and the reason is subtle enough to be worth
-	// stating: cmd/plant-operator restricts the manager's informer cache for
-	// every child type to objects labelled
-	// app.kubernetes.io/managed-by=plant-operator. That is exactly the right
-	// cache scope — but it also means the cached client CANNOT SEE a
-	// pre-existing, foreign object of the same name, which is precisely the
-	// object assertNotForeign exists to refuse to adopt. Through the cache
-	// that object reads as "does not exist," CreateOrUpdate would take the
-	// create path, and the operator would learn about it only as an opaque
-	// AlreadyExists error with no Degraded condition and no Event.
+	// It has to be uncached, for two reasons that both stem from
+	// cmd/plant-operator narrowing the manager's informer cache for every
+	// child type to objects labelled
+	// app.kubernetes.io/managed-by=plant-operator:
+	//
+	//   - A pre-existing FOREIGN object of the same name does not carry that
+	//     label, so through the cache it reads as "does not exist" — and it is
+	//     precisely the object assertOwnership exists to refuse to adopt.
+	//   - One of THIS OPERATOR'S OWN children whose label a human has stripped
+	//     also leaves the cache, and then a cached read makes the operator try
+	//     to create an object that already exists, forever, instead of putting
+	//     the label back. See applyChild's own comment; this was observed on a
+	//     live cluster.
 	//
 	// Left nil (as a unit test constructing a bare PlantReconciler may), the
 	// embedded Client is used instead.
 	APIReader client.Reader
 }
 
-// conflictingResourceError is returned by assertNotForeign when a child's
+// conflictingResourceError is returned by assertOwnership when a child's
 // name is already taken in the namespace by an object this operator does not
 // manage. It is a distinct type, rather than a sentinel or a string match, so
 // Reconcile can errors.As it out of the fmt.Errorf wrapping reconcileChildren
@@ -370,10 +375,7 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 	}
 
 	for _, child := range children {
-		if err := r.assertNotForeign(ctx, plant, child.kind, child.obj); err != nil {
-			return nil, false, false, fmt.Errorf("reconciling %s for plant %s/%s: %w", child.kind, plant.Namespace, plant.Name, err)
-		}
-		op, err := controllerutil.CreateOrUpdate(ctx, r.Client, child.obj, child.mutate)
+		op, err := r.applyChild(ctx, plant, child.kind, child.obj, child.mutate)
 		if err != nil {
 			return nil, false, false, fmt.Errorf("reconciling %s for plant %s/%s: %w", child.kind, plant.Namespace, plant.Name, err)
 		}
@@ -383,8 +385,94 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 	return deployment, created, updated, nil
 }
 
-// assertNotForeign refuses to take over an object this operator did not
-// create.
+// applyChild is controllerutil.CreateOrUpdate with two changes: the initial
+// read goes through the UNCACHED APIReader, and an ownership check runs
+// between the read and the mutate.
+//
+// The uncached read is not an optimization to be reversed later — it is
+// required for correctness, and the reason is an interaction between two
+// otherwise-good decisions that is worth spelling out:
+//
+//   - cmd/plant-operator narrows the manager's informer cache for every child
+//     type to objects labelled app.kubernetes.io/managed-by=plant-operator, so
+//     the operator does not hold every ConfigMap in the cluster in memory.
+//   - mergeLabels re-asserts that label on every reconcile, so drift on it is
+//     supposed to be self-correcting like any other drift.
+//
+// Together, through the CACHED client, they are not. Strip the label with
+// `kubectl label deploy fernie app.kubernetes.io/managed-by-` and the object
+// leaves the cache; a cached Get then reports NotFound; CreateOrUpdate takes
+// the create path; and the API server rejects it with AlreadyExists — every
+// reconcile, forever. The one thing that would have fixed the label is the
+// one thing that can no longer run. Observed on the live cluster, not
+// theorized: `reconciling Deployment for plant k8s-buddy-plants/fernie:
+// deployments.apps "fernie" already exists`, repeating on backoff.
+//
+// Reading through the APIReader closes it: the object is always found, so the
+// update path always runs, so mergeLabels puts the label back and the object
+// re-enters the cache. The cache keeps doing the job it was added for —
+// bounding what the informers WATCH and hold in memory — without being load-
+// bearing for correctness.
+//
+// The cost is six uncached GETs per reconcile. That is deliberate: it is the
+// same six reads the ownership guard needed anyway (they are now one read
+// each, not two), and a Plant reconciles at most once per wateringInterval
+// plus on child events.
+func (r *PlantReconciler) applyChild(
+	ctx context.Context,
+	plant *buddyv1alpha1.Plant,
+	kind string,
+	obj client.Object,
+	mutate controllerutil.MutateFn,
+) (controllerutil.OperationResult, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+
+	key := client.ObjectKeyFromObject(obj)
+	if err := reader.Get(ctx, key, obj); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return controllerutil.OperationResultNone, fmt.Errorf("reading existing %s %s: %w", kind, key, err)
+		}
+		// Nothing there: create it. There is no ownership question to
+		// answer about an object that does not exist.
+		if err := mutate(); err != nil {
+			return controllerutil.OperationResultNone, err
+		}
+		if err := r.Create(ctx, obj); err != nil {
+			return controllerutil.OperationResultNone, err
+		}
+		return controllerutil.OperationResultCreated, nil
+	}
+
+	if err := r.assertOwnership(plant, kind, obj); err != nil {
+		return controllerutil.OperationResultNone, err
+	}
+
+	// Same before/after comparison CreateOrUpdate makes, and for the same
+	// reason: every mutate* function assigns only the fields this operator
+	// owns, so an unchanged Plant produces a byte-identical object and this
+	// reports None instead of issuing a phantom write.
+	existing := obj.DeepCopyObject()
+	if err := mutate(); err != nil {
+		return controllerutil.OperationResultNone, err
+	}
+	if newKey := client.ObjectKeyFromObject(obj); newKey != key {
+		return controllerutil.OperationResultNone, fmt.Errorf("mutate function moved %s from %s to %s", kind, key, newKey)
+	}
+	if apiequality.Semantic.DeepEqual(existing, obj) {
+		return controllerutil.OperationResultNone, nil
+	}
+	if err := r.Update(ctx, obj); err != nil {
+		return controllerutil.OperationResultNone, err
+	}
+	return controllerutil.OperationResultUpdated, nil
+}
+
+// assertOwnership refuses to take over an object this operator did not
+// create. It is a pure check on an object applyChild has ALREADY fetched
+// (through the uncached reader), not a read of its own.
 //
 // controllerutil.CreateOrUpdate is Get-then-mutate-then-Update, and
 // controllerutil.SetControllerReference happily stamps a controller owner
@@ -431,32 +519,10 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 // The refusal itself is unchanged for the case the guard actually exists for:
 // an object with neither a matching controller reference nor the label is
 // somebody else's, and this operator will not touch it.
-//
-// The read goes through r.APIReader, uncached, on purpose — see the field's
-// own comment. A NotFound is the normal, overwhelmingly common case: nothing
-// exists yet, so there is nothing to refuse.
-func (r *PlantReconciler) assertNotForeign(ctx context.Context, plant *buddyv1alpha1.Plant, kind string, obj client.Object) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-
-	probe, ok := obj.DeepCopyObject().(client.Object)
-	if !ok { // unreachable: every child above is a client.Object
-		return fmt.Errorf("child %s is not a client.Object", kind)
-	}
-
-	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
-	if err := reader.Get(ctx, key, probe); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("checking whether %s %s already exists: %w", kind, key, err)
-	}
-
+func (r *PlantReconciler) assertOwnership(plant *buddyv1alpha1.Plant, kind string, obj client.Object) error {
 	// Step 1: definitive ownership. Nothing a human can do to the object's
 	// labels reaches this check.
-	owner := metav1.GetControllerOf(probe)
+	owner := metav1.GetControllerOf(obj)
 	if owner != nil && owner.UID == plant.UID {
 		return nil
 	}
@@ -464,7 +530,7 @@ func (r *PlantReconciler) assertNotForeign(ctx context.Context, plant *buddyv1al
 	// Step 2: no matching controller reference. The label is the only
 	// remaining evidence, and it is evidence this operator writes and nobody
 	// else does.
-	if probe.GetLabels()[LabelManagedBy] == appManagedBy {
+	if obj.GetLabels()[LabelManagedBy] == appManagedBy {
 		return nil
 	}
 
@@ -473,7 +539,7 @@ func (r *PlantReconciler) assertNotForeign(ctx context.Context, plant *buddyv1al
 		provenance = fmt.Sprintf("is controlled by %s/%s", owner.Kind, owner.Name)
 	}
 	return &conflictingResourceError{
-		kind: kind, namespace: key.Namespace, name: key.Name,
+		kind: kind, namespace: obj.GetNamespace(), name: obj.GetName(),
 		why: fmt.Sprintf("it already exists, %s, and does not carry %s=%s, so it was not created by this operator",
 			provenance, LabelManagedBy, appManagedBy),
 	}

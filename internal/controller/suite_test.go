@@ -175,7 +175,7 @@ func runSuite(m *testing.M) int {
 		Client: testCounting,
 		Scheme: testMgr.GetScheme(),
 		// The manager's uncached reader, exactly as cmd/plant-operator
-		// wires it. assertNotForeign is the only consumer, and giving it
+		// wires it. applyChild is the only consumer, and giving it
 		// the real thing here is what lets the adoption-refusal case below
 		// exercise the same code path the deployed operator runs.
 		APIReader: testMgr.GetAPIReader(),
