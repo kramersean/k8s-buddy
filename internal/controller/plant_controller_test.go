@@ -16,7 +16,10 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -69,6 +72,68 @@ func TestReconcile_CreatesAllSixChildrenWithOwnerReferences(t *testing.T) {
 		"both policy types must be declared, or the undeclared direction stays wide open")
 	require.Equal(t, SelectorFor(owner), networkPolicy.Spec.PodSelector.MatchLabels,
 		"the policy must select only this Plant's own pods, never the whole namespace")
+}
+
+// --- case 1a: graceful skip of the optional seventh child ---------------
+
+// TestReconcile_ServiceMonitorGracefullySkippedWithoutCRD is the envtest
+// proof for ADR 0008's closed ServiceMonitor deferral: this suite's envtest
+// control plane installs ONLY config/crd/bases (see suite_test.go's
+// testEnv.CRDDirectoryPaths) -- never the Prometheus Operator's own
+// ServiceMonitor CRD, which this repo does not own or vendor -- so every
+// test in this package already exercises the "CRD absent" path implicitly.
+// This test is the one that asserts it explicitly and by name: a Plant on a
+// cluster with no Prometheus Operator installed reaches Ready with exactly
+// its six unconditional children, no error, and (critically) no Degraded
+// condition caused by the missing optional CRD.
+//
+// What this test CANNOT prove -- because it structurally cannot install a
+// third-party CRD it doesn't own into this suite without contaminating every
+// other test's control plane -- is the inverse: that a ServiceMonitor
+// actually gets created once the CRD IS present. That is proven on the live
+// cluster instead, once kube-prometheus-stack's CRDs are installed (see the
+// task report's live-cluster verification and the CI e2e job's own
+// ServiceMonitor CRD install step).
+func TestReconcile_ServiceMonitorGracefullySkippedWithoutCRD(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "fernie", 3)
+	createPlant(t, plant)
+
+	waitForChildrenExist(t, plant)
+	waitForStatusPopulated(t, plant)
+	waitForReconcileQuiescence(t)
+
+	// The six unconditional children exist (waitForChildrenExist already
+	// polled for exactly these six); the ServiceMonitor -- unstructured,
+	// GVK monitoring.coreos.com/v1 ServiceMonitor -- must NOT exist, because
+	// the CRD it depends on was never installed into this control plane.
+	serviceMonitor := &unstructured.Unstructured{}
+	serviceMonitor.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor",
+	})
+	err := testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, serviceMonitor)
+	require.Error(t, err, "a ServiceMonitor must not exist when the CRD was never installed")
+	require.True(t, meta.IsNoMatchError(err) || apierrors.IsNotFound(err),
+		"expected a NoKindMatch or NotFound error (the CRD genuinely isn't registered), got: %v", err)
+
+	// Reconciliation completed cleanly and is not stuck retrying: status was
+	// written (waitForStatusPopulated/waitForReconcileQuiescence above
+	// already require this) and observedGeneration caught up to the Plant's
+	// own generation -- the signal a wedged reconcile (one returning an
+	// error every pass) would never produce.
+	//
+	// This envtest control plane runs no kubelet, so status.Conditions'
+	// Degraded is True/InsufficientReplicas here exactly the way
+	// TestReconcile_StatusReflectsNotReadyWithNoKubelet documents for every
+	// OTHER Plant in this suite -- that is expected and has nothing to do
+	// with the ServiceMonitor CRD. What this test actually guards against is
+	// a DIFFERENT failure mode: the missing CRD causing reconcileChildren to
+	// return an error at all (which would show up as observedGeneration
+	// never catching up, or the Get above timing out via waitForStatusPopulated).
+	got := &buddyv1alpha1.Plant{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
+	require.Equal(t, got.Generation, got.Status.ObservedGeneration,
+		"reconciliation must fully complete (and keep completing) even though the ServiceMonitor CRD is absent")
 }
 
 // --- case 1b: the live Deployment actually runs as the Plant's SA --------

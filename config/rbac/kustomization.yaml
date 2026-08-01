@@ -1,6 +1,7 @@
 # Bundles the operator's hand-written RBAC (service_account.yaml,
 # role_binding.yaml, leader_election_role.yaml,
-# leader_election_role_binding.yaml) and its GENERATED role.yaml (see the
+# leader_election_role_binding.yaml, metrics_reader_role.yaml) and its
+# GENERATED role.yaml (see the
 # Makefile's `manifests` target -- never hand-edit that file) into a single
 # base that deploy/kustomize/operator's own kustomization.yaml pulls in as
 # one resource. kustomize's default load restriction forbids a kustomization
@@ -16,3 +17,4 @@ resources:
   - role_binding.yaml
   - leader_election_role.yaml
   - leader_election_role_binding.yaml
+  - metrics_reader_role.yaml

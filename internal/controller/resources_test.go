@@ -10,6 +10,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
@@ -430,6 +431,7 @@ func TestDeterminism(t *testing.T) {
 	require.Equal(t, controller.PodDisruptionBudgetFor(p), controller.PodDisruptionBudgetFor(p))
 	require.Equal(t, controller.ServiceAccountFor(p), controller.ServiceAccountFor(p))
 	require.Equal(t, controller.NetworkPolicyFor(p), controller.NetworkPolicyFor(p))
+	require.Equal(t, controller.ServiceMonitorFor(p), controller.ServiceMonitorFor(p))
 	require.Equal(t, controller.LabelsFor(p), controller.LabelsFor(p))
 	require.Equal(t, controller.SelectorFor(p), controller.SelectorFor(p))
 
@@ -515,4 +517,53 @@ func TestServiceAccountFor(t *testing.T) {
 	require.Equal(t, controller.LabelsFor(p), sa.Labels)
 	require.NotNil(t, sa.AutomountServiceAccountToken)
 	require.False(t, *sa.AutomountServiceAccountToken)
+}
+
+// TestServiceMonitorFor is the seventh child, closing Plan 2's deferral (see
+// docs/adr/0008-deferred-to-plan-3.md). Unlike the other six, it is built as
+// an unstructured.Unstructured (see resources.go's own comment on why), so
+// this test reads it back through the unstructured accessors rather than
+// typed struct fields.
+func TestServiceMonitorFor(t *testing.T) {
+	t.Parallel()
+
+	p := testPlant()
+	sm := controller.ServiceMonitorFor(p)
+
+	require.Equal(t, "monitoring.coreos.com/v1", sm.GetAPIVersion())
+	require.Equal(t, "ServiceMonitor", sm.GetKind())
+	require.Equal(t, "fernie", sm.GetName())
+	require.Equal(t, "k8s-buddy", sm.GetNamespace())
+	require.Equal(t, controller.LabelsFor(p), sm.GetLabels())
+
+	selector, found, err := unstructured.NestedStringMap(sm.Object, "spec", "selector", "matchLabels")
+	require.NoError(t, err)
+	require.True(t, found, "spec.selector.matchLabels must be set")
+	require.Equal(t, controller.SelectorFor(p), selector,
+		"the ServiceMonitor must select only this Plant's own Service, never every Service in the namespace")
+
+	endpoints, found, err := unstructured.NestedSlice(sm.Object, "spec", "endpoints")
+	require.NoError(t, err)
+	require.True(t, found, "spec.endpoints must be set")
+	require.Len(t, endpoints, 1)
+
+	endpoint, ok := endpoints[0].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "http", endpoint["port"], "must scrape the same named port ServiceFor exposes buddy-api's /metrics on")
+	require.Equal(t, "/metrics", endpoint["path"])
+	require.NotEmpty(t, endpoint["interval"])
+}
+
+// TestServiceMonitorFor_NoOwnerReference documents, the same way
+// DeploymentFor's own doc comment does, that ServiceMonitorFor deliberately
+// sets no owner reference: every builder in this file is a pure function of
+// a *Plant only, and the reconciler is what has a *runtime.Scheme to set
+// ownership with.
+func TestServiceMonitorFor_NoOwnerReference(t *testing.T) {
+	t.Parallel()
+
+	p := testPlant()
+	sm := controller.ServiceMonitorFor(p)
+
+	require.Empty(t, sm.GetOwnerReferences())
 }

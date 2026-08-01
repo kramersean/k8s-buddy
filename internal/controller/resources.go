@@ -23,6 +23,7 @@
 package controller
 
 import (
+	"fmt"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,6 +32,8 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -93,6 +96,12 @@ const (
 	// kube-system, on both UDP and TCP. Named rather than repeated as a
 	// bare 53 twice for the same reason containerPort is.
 	dnsPortNumber = 53
+
+	// serviceMonitorScrapeInterval is how often Prometheus scrapes a
+	// Plant's /metrics endpoint via the ServiceMonitor ServiceMonitorFor
+	// builds. Independent of WateringInterval (which governs how often
+	// this operator reconciles, not how often Prometheus scrapes).
+	serviceMonitorScrapeInterval = "30s"
 
 	// terminationGracePeriodSeconds must stay comfortably above buddy-api's
 	// own shutdown sequence (BUDDY_SHUTDOWN_DELAY, default 5s, plus up to a
@@ -582,6 +591,94 @@ func NetworkPolicyFor(p *buddyv1alpha1.Plant) *networkingv1.NetworkPolicy {
 			},
 		},
 	}
+}
+
+// serviceMonitorGVK identifies the Prometheus Operator's ServiceMonitor
+// CustomResourceDefinition (group monitoring.coreos.com, version v1). It is
+// a GroupVersionKind constant rather than a Go type from the
+// prometheus-operator API module deliberately: this operator has no other
+// reason to depend on that module, and unstructured.Unstructured lets
+// ServiceMonitorFor build (and PlantReconciler gracefully skip) the object
+// without ever requiring the CRD's Go types to be registered in this
+// process's scheme. See PlantReconciler.serviceMonitorCRDAvailable in
+// plant_controller.go for the RESTMapper check that guards every use of
+// this GVK.
+var serviceMonitorGVK = schema.GroupVersionKind{
+	Group:   "monitoring.coreos.com",
+	Version: "v1",
+	Kind:    "ServiceMonitor",
+}
+
+// ServiceMonitorFor builds the seventh child a Plant owns: a ServiceMonitor
+// telling a Prometheus Operator-managed Prometheus to scrape p's own
+// /metrics endpoint (the ClusterIP Service ServiceFor builds, port "http",
+// which is the same port cmd/buddy-api serves both application traffic and
+// /metrics on). It is named exactly p.Name, in p.Namespace, and does not set
+// an owner reference — see DeploymentFor's comment for why.
+//
+// Unlike every other child in this file, ServiceMonitor is not a built-in
+// Kubernetes type: it is a CustomResourceDefinition owned by the Prometheus
+// Operator, which may or may not be installed on the cluster this operator
+// is running on. ServiceMonitorFor itself is unconditional and always
+// returns a well-formed object — the CONDITION on whether that object is
+// ever actually applied lives in plant_controller.go's
+// serviceMonitorCRDAvailable, not here. Keeping this builder pure and
+// unconditional, like every other builder in this file, is what keeps it
+// testable (see TestServiceMonitorFor) without a cluster, a RESTMapper, or
+// any notion of what CRDs happen to be installed anywhere.
+//
+// The returned object's GroupVersionKind is set explicitly via
+// SetGroupVersionKind, which unstructured.Unstructured requires before it
+// can be used with a client.Client Get/Create/Update call — unlike a typed
+// object, an unstructured one carries no compile-time-known GVK for the
+// client library to resolve on its own.
+func ServiceMonitorFor(p *buddyv1alpha1.Plant) *unstructured.Unstructured {
+	sm := &unstructured.Unstructured{}
+	sm.SetGroupVersionKind(serviceMonitorGVK)
+	sm.SetName(p.Name)
+	sm.SetNamespace(p.Namespace)
+	sm.SetLabels(LabelsFor(p))
+
+	spec := map[string]interface{}{
+		// Selects the Service ServiceFor builds for this Plant (which
+		// carries the full LabelsFor set), never a namespace-wide
+		// selector — the same "select only what this Plant owns" posture
+		// SelectorFor's own doc comment explains for the Deployment,
+		// Service, and PodDisruptionBudget selectors above.
+		"selector": map[string]interface{}{
+			"matchLabels": stringMapToInterfaceMap(SelectorFor(p)),
+		},
+		"endpoints": []interface{}{
+			map[string]interface{}{
+				"port":     containerPortName,
+				"path":     "/metrics",
+				"interval": serviceMonitorScrapeInterval,
+			},
+		},
+	}
+	if err := unstructured.SetNestedMap(sm.Object, spec, "spec"); err != nil {
+		// Every value spec is built from above is a plain string or a
+		// nested map/slice of plain strings -- exactly the JSON-safe
+		// types SetNestedMap accepts -- so this branch is unreachable in
+		// practice. It is still handled, rather than ignored with `_ =`,
+		// because a silently-empty spec would be a ServiceMonitor that
+		// applies successfully and scrapes nothing, which is a far worse
+		// failure mode than a panic a test would catch immediately.
+		panic(fmt.Sprintf("ServiceMonitorFor: building spec for plant %s/%s: %v", p.Namespace, p.Name, err))
+	}
+
+	return sm
+}
+
+// stringMapToInterfaceMap converts a map[string]string to the
+// map[string]interface{} shape unstructured.SetNestedMap requires. Every
+// value in the result is a plain string, so SetNestedMap never rejects it.
+func stringMapToInterfaceMap(m map[string]string) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // ResourcesFor returns the CPU/memory requests and limits for a resource

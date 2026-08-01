@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by Plan 3 Task 2: the ServiceMonitor deferral (#2) is
+**closed** — it is delivered below. The HPA omission (#1) is **not** closed;
+it is upgraded from a deferral to a **permanent decision**, for the reason
+given in its own section.
 
 ## Context
 
@@ -26,9 +29,11 @@ reasoning next to every other design decision in the repo.
 The following are deliberately deferred to Plan 3. None is an oversight; each is
 blocked on a prerequisite that Plan 3 installs.
 
-### 1. HorizontalPodAutoscaler
+### 1. HorizontalPodAutoscaler — PERMANENT, not merely deferred
 
-The spec lists an HPA among the operator's owned resources. It is not created.
+The spec lists an HPA among the operator's owned resources. It is not created,
+and — as of Plan 3 Task 2, which installs kube-prometheus-stack — it is now
+clear it should not be, ever, on this cluster.
 
 An HPA scaling on CPU or memory requires `metrics-server` to be running and
 serving `metrics.k8s.io`. This is a bare `kind` cluster with no metrics pipeline
@@ -38,34 +43,69 @@ it is a resource that looks correct in `kubectl get hpa` and does nothing, which
 invites a reviewer to conclude the autoscaling works when it has never once made
 a scaling decision.
 
-Plan 3 installs kube-prometheus-stack, which brings the metrics prerequisite with
-it, and the HPA becomes a seventh owned child there.
+The original text of this section expected Plan 3's observability stack to
+supply the missing prerequisite. It does not, and on reflection could not have:
+`metrics-server` and `kube-prometheus-stack` are two independent metrics
+pipelines that happen to share the word "metrics". Installing Prometheus gives
+the cluster a time-series database that SCRAPES `/metrics` endpoints; it does
+not make the cluster's `metrics.k8s.io` aggregated API exist, which is the one
+and only thing `autoscaling/v2`'s `Resource` metric source (CPU/memory) actually
+reads from. (A [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
+can bridge the two, translating PromQL into a `custom.metrics.k8s.io` or
+`external.metrics.k8s.io` API an HPA can target — but that is a second Helm
+release, a second CRD, and a second thing to keep healthy, entirely out of
+proportion to what a portfolio demo's autoscaling story needs to prove.)
 
-Partial groundwork is already in place: the `Plant` CRD carries the **scale
-subresource** (`specpath: .spec.replicas`, `statuspath: .status.readyReplicas`),
-so `kubectl scale plant fernie --replicas=5` works today. Its `selectorpath` is
-deliberately empty — that field is consulted only by an HPA reading pod metrics,
-so pointing it somewhere now would be declaring support for something that cannot
-work. Plan 3 sets it to `.status.selector` and adds the corresponding string
-field to `PlantStatus`.
+So the HPA is not "next"; it is **permanently out of scope for this project**,
+for the same one-line reason as always — kind ships no metrics-server, so an
+HPA would sit `ScalingActive=False` forever, and a resource that looks right
+and does nothing is worse than an absent one — now stated as a decision rather
+than a placeholder waiting on a prerequisite that was never actually coming.
 
-### 2. ServiceMonitor
+Partial groundwork stays in place regardless: the `Plant` CRD carries the
+**scale subresource** (`specpath: .spec.replicas`, `statuspath:
+.status.readyReplicas`), so `kubectl scale plant fernie --replicas=5` works
+today and will keep working. Its `selectorpath` stays deliberately empty —
+that field is consulted only by an HPA reading pod metrics, and pointing it
+somewhere would be declaring support for something that, per this section, is
+not coming.
 
-The spec lists a ServiceMonitor among the operator's owned resources. It is not
-created.
+### 2. ServiceMonitor — CLOSED in Plan 3 Task 2
+
+The spec lists a ServiceMonitor among the operator's owned resources. It was not
+created in Plan 2. **It is now the operator's seventh owned child**, added by
+Plan 3 Task 2 (`ServiceMonitorFor` in `internal/controller/resources.go`,
+wired into `PlantReconciler.reconcileChildren` in `plant_controller.go`).
 
 `ServiceMonitor` is a CRD owned by the Prometheus Operator. On a cluster where
-that CRD is not installed — which is every cluster this project currently runs
-on — creating one fails outright with `no matches for kind "ServiceMonitor"`, and
-an operator that unconditionally reconciles one would go into a permanent error
-loop on a cluster with no Prometheus. Guarding it behind a runtime
-API-availability check is real, legitimate operator engineering, and it is Plan 3
-work, done once the CRD is actually present to check for.
+that CRD is not installed, creating one fails outright with `no matches for
+kind "ServiceMonitor"`, and an operator that unconditionally reconciled one
+would go into a permanent error loop on a cluster with no Prometheus — so the
+child is guarded behind a runtime check
+(`PlantReconciler.serviceMonitorCRDAvailable`) that asks the client's
+RESTMapper whether `monitoring.coreos.com/v1, Kind=ServiceMonitor` resolves,
+on every reconcile of every Plant. When it does not, the Plant reconciles its
+other six children exactly as before, logs the absence once per process
+lifetime (not once per Plant per reconcile), and stays Ready — a missing
+optional CRD is not a degraded Plant. When the CRD later appears (Prometheus
+installed after the operator was already running), the very next reconcile of
+every Plant starts creating its ServiceMonitor, with no operator restart
+required.
+
+`ServiceMonitorFor` returns `*unstructured.Unstructured` rather than a typed
+object from the `prometheus-operator/prometheus-operator` API module — a
+dependency this repo has no other reason to take on. `unstructured` also
+composes naturally with the availability guard above: the builder itself stays
+unconditional and cluster-independent (testable with zero cluster, exactly like
+every other builder in `resources.go`), and the ONE place that needs to know
+whether the CRD actually exists is the reconciler, not the builder.
 
 The workload already exposes `/metrics` in Prometheus format and the operator
-already serves its own controller-runtime metrics on `:8081`, so nothing about
-the scrape targets changes in Plan 3 — only the object that tells Prometheus to
-scrape them.
+already serves its own controller-runtime metrics on `:8081` — Plan 3 Task 2
+additionally gates that endpoint with `filters.WithAuthenticationAndAuthorization`
+and adds the RBAC and metrics Services letting Prometheus reach it. Nothing about
+the scrape TARGETS changed the shape they already had; this closes the object
+that tells Prometheus to scrape them.
 
 ### 3. `PlantSpec.chaos`
 
@@ -88,13 +128,22 @@ controller that reads it.
 
 ## Consequences
 
-- `Plant` today owns six children, not eight. The count in `resources.go`, the
-  envtest suite, and CI's e2e assertion all agree on six, and all three change
-  together when Plan 3 adds more.
-- `kubectl scale plant` works now; `kubectl autoscale plant` will not do anything
-  useful until Plan 3 supplies `selectorpath` and a metrics source.
-- `kubectl explain plant.spec` shows six fields and no `chaos`. A reader
+- `Plant` now owns **seven** children (Deployment, Service, ConfigMap,
+  PodDisruptionBudget, ServiceAccount, NetworkPolicy, ServiceMonitor), not six
+  and not eight. The count in `resources.go`, the determinism test, and CI's
+  live-cluster e2e assertion all agree on seven whenever the ServiceMonitor CRD
+  is installed; envtest's own control plane never installs that third-party CRD
+  (see `suite_test.go`), so its shared six-children helper stays six by
+  construction — the seventh child's existence is proven on the live cluster
+  instead (both in this task's own verification and in CI's e2e job), and its
+  GRACEFUL ABSENCE is proven in envtest.
+- `kubectl autoscale plant` will never do anything useful on this cluster. This
+  is now permanent, not pending — see section 1's amendment above. `kubectl
+  scale plant` keeps working, unaffected.
+- `kubectl explain plant.spec` shows six fields and no `chaos`. `chaos` (section
+  3) remains genuinely deferred/dropped, unaffected by this amendment. A reader
   comparing the CRD against the design spec finds the gap and finds this ADR.
-- Plan 3 is where all three land. If Plan 3 changes shape and any of them is
-  dropped permanently rather than deferred, this ADR should be superseded with
-  one that says so, not silently left describing a plan that no longer exists.
+- `PlantSpec.chaos` (section 3) is unaffected by this amendment: still
+  deliberately absent, still recorded as dropped-with-no-inert-field, per
+  Plan 3's own design (chaos runs as chaos-buddy, a separate workload, not a
+  per-Plant controller — see Plan 3's "Out of scope" section and its own ADR).

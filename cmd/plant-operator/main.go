@@ -26,6 +26,7 @@ import (
 	healthz "sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
@@ -95,9 +96,38 @@ func main() {
 	)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Cache:                  controller.CacheOptions(),
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		Scheme: scheme,
+		Cache:  controller.CacheOptions(),
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+			// This closes the last item carried out of Plan 2 (see
+			// docs/adr/0008-deferred-to-plan-3.md): the operator's
+			// controller-runtime metrics used to be served on :8081 with no
+			// authentication at all -- anything that could reach the pod's
+			// network could read them. WithAuthenticationAndAuthorization
+			// wraps the handler so every request must present a bearer
+			// token the API server recognizes (TokenReview) AND be
+			// authorized for `GET` on the non-resource URL `/metrics`
+			// (SubjectAccessReview) -- see config/rbac/role.yaml (the
+			// tokenreviews/subjectaccessreviews rules, generated from
+			// plant_controller.go's own +kubebuilder:rbac markers) for the
+			// operator's half of that check, and
+			// config/rbac/metrics_reader_role.yaml plus
+			// deploy/observability/prometheus-rbac.yaml for the scraper's
+			// half. SecureServing:true is paired with it deliberately: a
+			// bearer token sent over plaintext HTTP defeats much of the
+			// point of requiring one. With no CertDir configured and no
+			// cert-manager in this project's scope, the metrics server
+			// falls back to an in-memory self-signed certificate generated
+			// fresh at startup (see controller-runtime's
+			// metricsserver.createListener) -- good enough to encrypt the
+			// transport for a cluster-internal scrape; Prometheus's
+			// ServiceMonitor is configured with insecureSkipVerify for
+			// exactly this reason (see deploy/kustomize/operator/
+			// servicemonitor.yaml).
+			SecureServing:  true,
+			FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		// A fixed, project-scoped ID: two different operators (or two

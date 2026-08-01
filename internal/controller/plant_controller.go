@@ -12,8 +12,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -22,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
@@ -117,8 +120,9 @@ const (
 )
 
 // PlantReconciler reconciles a Plant object: it drives the generated
-// Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount, and
-// NetworkPolicy toward the state resources.go's builders describe, and
+// Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount,
+// NetworkPolicy, and (when the Prometheus Operator CRD is installed)
+// ServiceMonitor toward the state resources.go's builders describe, and
 // reports their aggregate health back onto Plant.status.
 type PlantReconciler struct {
 	client.Client
@@ -150,6 +154,17 @@ type PlantReconciler struct {
 	// Left nil (as a unit test constructing a bare PlantReconciler may), the
 	// embedded Client is used instead.
 	APIReader client.Reader
+
+	// serviceMonitorUnavailableLogOnce guards how often reconcileChildren
+	// logs the absence of the Prometheus Operator's ServiceMonitor CRD. The
+	// RESTMapper check itself (serviceMonitorCRDAvailable) runs on EVERY
+	// reconcile of EVERY Plant — that is what lets the operator start
+	// creating ServiceMonitors the moment the CRD is installed later,
+	// without a restart — but logging on every one of those checks would
+	// mean one line per Plant per WateringInterval, forever, on any cluster
+	// that simply doesn't run Prometheus. The zero value (unstarted) is
+	// ready to use, so no constructor needs to set this up.
+	serviceMonitorUnavailableLogOnce sync.Once
 }
 
 // conflictingResourceError is returned by assertOwnership when a child's
@@ -187,6 +202,26 @@ func (e *conflictingResourceError) Error() string {
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// servicemonitors is the seventh owned child (see ServiceMonitorFor in
+// resources.go and serviceMonitorCRDAvailable below). This marker grants the
+// permission unconditionally, on every cluster this operator's RBAC is
+// installed on, regardless of whether the ServiceMonitor CRD itself happens
+// to be present — a ClusterRole rule naming a CRD group/resource that isn't
+// installed yet is inert, not invalid, so there is no ordering requirement
+// between installing this RBAC and installing the Prometheus Operator.
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=create;get;list;watch;update;patch;delete
+// The metrics endpoint's authn/authz filter (cmd/plant-operator/main.go,
+// filters.WithAuthenticationAndAuthorization) needs the operator's own
+// ServiceAccount to be able to ask the API server "who is this caller"
+// (TokenReview) and "can this caller GET /metrics" (SubjectAccessReview) for
+// every request to :8081/metrics. These two markers live here rather than in
+// cmd/plant-operator/main.go itself only because the Makefile's `manifests`
+// target scans MANIFEST_DIRS (api/v1alpha1 and internal/controller), which
+// does not include ./cmd/... — role.yaml is generated-only (see the
+// Makefile's own comment on that target), so every rule it needs has to be
+// markable somewhere controller-gen actually looks.
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
 // Reconcile drives a single Plant toward its desired state: fetch, validate
 // the name, apply every owned child, write status, requeue.
@@ -339,6 +374,8 @@ func (r *PlantReconciler) markDegraded(ctx context.Context, plant *buddyv1alpha1
 // unchanged child on every pass, and CreateOrUpdate correctly reports
 // OperationResultNone instead of a phantom update.
 func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1alpha1.Plant) (*appsv1.Deployment, bool, bool, error) {
+	log := logf.FromContext(ctx)
+
 	created := false
 	updated := false
 
@@ -358,10 +395,14 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 	serviceAccount := &corev1.ServiceAccount{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
 	networkPolicy := &networkingv1.NetworkPolicy{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
 
-	// One table, six entries, so "how many children does a Plant own" has a
-	// single answer in the source rather than six near-identical blocks that
-	// a seventh child could quietly be added beside without the count ever
-	// being restated.
+	// One table, six entries, so "how many children does a Plant
+	// unconditionally own" has a single answer in the source rather than six
+	// near-identical blocks. The seventh, OPTIONAL child (ServiceMonitor) is
+	// deliberately handled separately below, not folded into this table: it
+	// is the one child whose very existence depends on a runtime check
+	// (serviceMonitorCRDAvailable), and mixing a conditional entry into a
+	// table every other entry treats unconditionally would make "does this
+	// Plant have N children" stop having one obvious answer at a glance.
 	children := []struct {
 		kind   string
 		obj    client.Object
@@ -383,7 +424,55 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 		note(op)
 	}
 
+	// The seventh child: ServiceMonitor, owned only when the Prometheus
+	// Operator CRD is actually installed. See ADR 0008 (#2, now closed) and
+	// serviceMonitorCRDAvailable's own comment for why this check has to run
+	// fresh on every reconcile rather than being decided once at startup —
+	// a cluster that installs Prometheus AFTER this operator is already
+	// running must start getting ServiceMonitors on its very next
+	// WateringInterval, not require an operator restart.
+	if r.serviceMonitorCRDAvailable(log) {
+		serviceMonitor := ServiceMonitorFor(plant)
+		op, err := r.applyChild(ctx, plant, "ServiceMonitor", serviceMonitor, func() error {
+			return r.mutateServiceMonitor(plant, serviceMonitor)
+		})
+		if err != nil {
+			return nil, false, false, fmt.Errorf("reconciling ServiceMonitor for plant %s/%s: %w", plant.Namespace, plant.Name, err)
+		}
+		note(op)
+	}
+
 	return deployment, created, updated, nil
+}
+
+// serviceMonitorCRDAvailable reports whether the Prometheus Operator's
+// ServiceMonitor CRD (monitoring.coreos.com/v1, Kind ServiceMonitor) is
+// registered on the cluster this reconciler is running against, by asking
+// the client's RESTMapper to resolve it — the same mechanism client-go's own
+// typed and dynamic clients use internally to turn a GroupVersionKind into
+// an API path, so a "no" here means the API server itself would reject a
+// request for that kind, not merely that this process hasn't cached it yet.
+//
+// A missing or unresolvable CRD is treated as "not available", never as a
+// fatal error: the whole point of this check is that a cluster with no
+// Prometheus Operator installed must keep reconciling every OTHER child
+// normally, forever, with the ServiceMonitor simply omitted — see ADR 0008.
+// The one-line log this emits fires at most once per process lifetime (via
+// serviceMonitorUnavailableLogOnce), not once per Plant per reconcile, so a
+// cluster that genuinely has no Prometheus Operator doesn't accumulate one
+// log line per Plant per WateringInterval forever.
+func (r *PlantReconciler) serviceMonitorCRDAvailable(log logr.Logger) bool {
+	_, err := r.RESTMapper().RESTMapping(serviceMonitorGVK.GroupKind(), serviceMonitorGVK.Version)
+	if err != nil {
+		r.serviceMonitorUnavailableLogOnce.Do(func() {
+			log.Info("ServiceMonitor CRD (monitoring.coreos.com/v1) not found on this cluster; "+
+				"every Plant will skip its ServiceMonitor child until the Prometheus Operator is installed "+
+				"(this is expected and does not affect the other six children)",
+				"error", err.Error())
+		})
+		return false
+	}
+	return true
 }
 
 // applyChild is controllerutil.CreateOrUpdate with two changes: the initial
@@ -791,6 +880,43 @@ func (r *PlantReconciler) mutateNetworkPolicy(plant *buddyv1alpha1.Plant, networ
 	networkPolicy.Spec.PolicyTypes = desired.Spec.PolicyTypes
 	networkPolicy.Spec.Ingress = desired.Spec.Ingress
 	networkPolicy.Spec.Egress = desired.Spec.Egress
+
+	return nil
+}
+
+// mutateServiceMonitor sets serviceMonitor's fields to those
+// ServiceMonitorFor(plant) describes, owning Labels and the entire spec —
+// like ConfigMap and NetworkPolicy above, a ServiceMonitor has no
+// server-defaulted subfields this operator needs to avoid clobbering, so
+// spec is copied wholesale rather than field by field.
+//
+// This is only ever called from reconcileChildren's serviceMonitorCRDAvailable
+// branch, so by the time it runs the CRD is already known to exist —
+// SetControllerReference itself needs nothing from the ServiceMonitor CRD
+// (it only resolves plant's own GroupVersionKind via r.Scheme, which is
+// unrelated to what kind the CONTROLLED object is), so this function would
+// work identically even if called with the CRD absent; the guard lives in
+// the caller because that is where it belongs, not because this function
+// requires it.
+func (r *PlantReconciler) mutateServiceMonitor(plant *buddyv1alpha1.Plant, serviceMonitor *unstructured.Unstructured) error {
+	desired := ServiceMonitorFor(plant)
+
+	if err := controllerutil.SetControllerReference(plant, serviceMonitor, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on servicemonitor: %w", err)
+	}
+
+	serviceMonitor.SetLabels(mergeLabels(serviceMonitor.GetLabels(), desired.GetLabels()))
+
+	desiredSpec, found, err := unstructured.NestedMap(desired.Object, "spec")
+	if err != nil {
+		return fmt.Errorf("reading desired servicemonitor spec for plant %s/%s: %w", plant.Namespace, plant.Name, err)
+	}
+	if !found {
+		return fmt.Errorf("ServiceMonitorFor(%s/%s) built an object with no spec", plant.Namespace, plant.Name)
+	}
+	if err := unstructured.SetNestedMap(serviceMonitor.Object, desiredSpec, "spec"); err != nil {
+		return fmt.Errorf("setting servicemonitor spec for plant %s/%s: %w", plant.Namespace, plant.Name, err)
+	}
 
 	return nil
 }
