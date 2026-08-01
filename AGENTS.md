@@ -2,53 +2,142 @@
 
 ## Project Vision
 
-K8s Buddy is a personal Kubernetes observability sandbox.
+K8s Buddy is a portfolio project whose job is to prove Kubernetes competence to
+a technical reviewer in under five minutes. It does that by making cluster
+self-healing *visible*: a friendly "talking plant" workload reports its mood,
+controlled chaos wilts it, and Kubernetes brings it back while Prometheus and
+Grafana record the whole arc.
 
-It is a friendly “talking plant” application that demonstrates:
-- Kubernetes self-healing
-- random pod and readiness failures
-- Prometheus metrics
-- structured logs
-- traces
-- Grafana dashboards
-- clear local demo workflows
+Two reviewers matter, and both must come away convinced:
 
-The app should feel alive. It should report statuses like:
-- “I’m feeling leafy and stable 🌱”
-- “Lost a leaf, but I’m recovering.”
-- “I’m not feeling too hot.”
-- “I’m ready to rock and roll 🌿”
+- A recruiter or hiring manager who reads only the README and looks at screenshots.
+- A senior Kubernetes engineer who opens `internal/controller/` and the CI workflows.
 
-## Current Goal
+The central design decision is that the plant is a **Custom Resource**, not a
+hardcoded Deployment. Applying a `Plant` manifest causes a custom operator to
+create and continuously reconcile the workload behind it — CRDs,
+reconciliation loops, status subresources, owner references and garbage
+collection, finalizers, admission webhooks, leader election, and
+least-privilege RBAC are all genuinely exercised, not simulated.
 
-Build toward a local demo where:
+## The Four Components
 
-1. A user starts a kind cluster.
-2. K8s Buddy deploys locally.
-3. buddy-api exposes health, readiness, work, and status endpoints.
-4. chaos-buddy causes controlled failure.
-5. Kubernetes restarts or recovers affected pods.
-6. Prometheus captures the behavior.
-7. Grafana makes the recovery visible.
-8. README explains the whole demo clearly.
+All Go, in a single module (`github.com/kramersean/k8s-buddy`):
+
+1. **buddy-api** — the plant itself. An HTTP service exposing `/healthz`,
+   `/readyz`, `/status` (plant-themed mood JSON), `/work` (simulated load with
+   configurable latency and error rate), and `/metrics`. Mood is a pure
+   function of health inputs, isolated in `internal/mood` so it is
+   unit-testable without HTTP or Kubernetes.
+2. **plant-operator** — a controller-runtime operator owning the `Plant`
+   custom resource (`buddy.k8s-buddy.io/v1alpha1`). Reconciles six owned
+   children: Deployment, Service, ConfigMap, PodDisruptionBudget,
+   ServiceAccount, and NetworkPolicy. The HorizontalPodAutoscaler and
+   ServiceMonitor the original design spec also lists are **deferred to Plan
+   3**, along with `PlantSpec.chaos` — see
+   `docs/adr/0008-deferred-to-plan-3.md` for why each is blocked on a Plan 3
+   prerequisite rather than merely unfinished.
+3. **chaos-buddy** — a controlled failure injector with deliberately narrow
+   RBAC (list/delete pods matching one label selector, in one namespace, and
+   nothing else). Modes: pod-kill, readiness-flap, latency, cpu-burn, oom.
+4. **Observability** — kube-prometheus-stack plus Loki, with dashboards and
+   alerting rules committed to the repo and provisioned automatically, never
+   clicked together by hand.
+
+See `docs/superpowers/specs/2026-07-31-k8s-buddy-platform-showcase-design.md`
+for the full design and `docs/adr/` for the reasoning behind specific
+decisions.
+
+## Local-Only Constraint
+
+The entire demo runs on a local `kind` cluster. There is no deployment to real
+cloud infrastructure, no managed Kubernetes service, and no external
+dependency the reviewer would need credentials for. `make demo` on a clean
+machine with Docker is the whole install story.
+
+## How to Validate
+
+The Makefile is the single entry point; use its targets rather than raw
+`go`/`docker`/`kubectl` invocations so local runs and CI never drift apart.
+
+```bash
+make help            # list every available target
+
+# Static checks and tests
+make fmt              # gofmt -w across the module
+make vet              # go vet ./...
+make lint             # golangci-lint, pinned version, installed into .tools/
+make test             # unit tests
+make test-race        # unit tests with the race detector (needs cgo; CI runs this on ubuntu-latest)
+make test-cover       # unit tests with a coverage profile, then a per-function report
+
+# Build
+make build            # compile every ./cmd/* binary into bin/
+make docker-build     # build the buddy-api image, tagged with the short git SHA and :dev
+
+# Local cluster
+make kind-up          # create the kind cluster (k8s-buddy) if it does not exist
+make kind-load        # load the built image (SHA tag and :dev) into the kind cluster
+make kind-down        # delete the kind cluster
+make deploy           # apply the manifests, pinning the image to the immutable git SHA
+make undeploy         # remove the manifests from the current context
+make install-crd      # apply the generated Plant CRD
+make deploy-operator  # CRD + build + load + apply the operator (all prerequisites included)
+make status           # pods/services/PDB plus rollout status in the k8s-buddy namespace
+make logs             # tail logs from every buddy-api pod
+
+# The two demos
+make demo             # A: static manifests (Plan 1 path) -- chaos + recovery via hack/demo.sh
+make demo-operator    # B: Plant CRD + operator (RECOMMENDED) -- one command, from nothing
+                      #    to a reconciled Plant with all six owned children
+
+# Housekeeping
+make clean            # remove bin/, .build/, and coverage output
+make tools            # install/update pinned developer tooling into .tools/
+make tools-clean      # remove .tools/
+make rename-module    # rewrite the module path everywhere (MODULE=github.com/you/repo)
+```
+
+`make demo-operator` is the headline path and the one to reach for: it goes from
+a machine with Docker to a `Plant` whose six owned children are reconciled and
+ready, in one command. `make demo` is Plan 1's static-manifest path — still the
+fallback that works with nothing but `kubectl`, and still where chaos/recovery is
+proven — but it creates no `Plant` and exercises no operator.
+
+Plants live in the `k8s-buddy-plants` namespace, not `default`: `default` carries
+no Pod Security Admission labels, so a Plant applied there would run *less*
+constrained than Plan 1's static workload. Both sample Plants set `namespace:`
+explicitly, and the operator generates a per-Plant NetworkPolicy as its sixth
+owned child.
+
+`make deploy` never applies `deploy/kustomize/base` directly. The base pins a
+mutable `:dev` tag, and re-applying a mutable tag after a rebuild produces a
+byte-identical PodSpec, so no rollout happens and the cluster silently keeps
+running the old image. `deploy` renders a generated overlay under `.build/`
+(gitignored) that pins the immutable short git SHA instead. Use it rather than
+a raw `kubectl apply -k`.
+
+Prefer `kubectl apply --dry-run=client` and `helm template` before applying
+anything for real.
 
 ## Hard Constraints
 
 - Work only inside this repository.
 - Do not access files outside the repo.
 - Do not read or expose secrets.
-- Do not touch SSH keys, cloud credentials, kubeconfigs outside expected local development usage, or personal files.
+- Do not touch SSH keys, cloud credentials, kubeconfigs outside expected local
+  development usage, or personal files.
 - Do not deploy to real cloud infrastructure.
 - Prefer kind, local Docker, local Helm, and dry-run validation.
 - Make small, reviewable changes.
 - Add or update tests when behavior changes.
 - Run validation commands after changes.
-- Do not rewrite the entire project unless explicitly asked.
 - Do not delete major files without explaining why.
 
 ## Development Style
 
-Prefer vertical slices over giant rewrites.
+Prefer vertical slices over giant rewrites. Each change should leave the
+project in a demonstrable state.
 
 Good:
 - Add `/status` endpoint with tests.
@@ -61,14 +150,3 @@ Bad:
 - Replace the stack.
 - Add a huge framework without need.
 - Make architecture more complex than the demo requires.
-
-## Validation Expectations
-
-Use the most relevant checks available, such as:
-
-```bash
-go test ./...
-pytest
-docker compose config
-kubectl apply --dry-run=client -f k8s/
-helm template ./charts/k8s-buddy

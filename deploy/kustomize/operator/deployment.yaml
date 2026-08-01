@@ -1,0 +1,144 @@
+# The operator itself: a single controller-runtime manager process reconciling
+# every Plant on the cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plant-operator
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # 1 replica, not N: leader election (cmd/plant-operator/main.go,
+  # LeaderElectionID "plant-operator.buddy.k8s-buddy.io") makes running more
+  # than one replica *safe* -- only one would ever hold the lease and
+  # reconcile at a time -- but this project has no availability requirement
+  # that justifies the extra idle replica. Leader election stays enabled
+  # anyway so scaling this up later (e.g. a future plan wanting warm
+  # standbys) is a `replicas:` edit, not a behavior change.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: plant-operator
+      app.kubernetes.io/instance: plant-operator
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: plant-operator
+        app.kubernetes.io/instance: plant-operator
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/part-of: k8s-buddy
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: plant-operator
+      # Unlike every generated Plant workload (which sets
+      # automountServiceAccountToken: false -- see
+      # deploy/kustomize/base/serviceaccount.yaml and ServiceAccountFor's own
+      # comment in internal/controller/resources.go), this pod's whole job is
+      # calling the Kubernetes API: watching Plants and writing their owned
+      # children. Leaving this unset (defaulting to true, the mounted token)
+      # is therefore deliberate, not an oversight -- the contrast with the
+      # workload's posture is the point, and config/rbac/role.yaml is what
+      # actually bounds what that mounted token can do.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: plant-operator
+          # Untagged on purpose, same reasoning as deploy/kustomize/base/
+          # deployment.yaml: the tag comes from the `images:` transformer in
+          # kustomization.yaml, which `make deploy-operator` overrides with
+          # the immutable git SHA of the build being deployed.
+          image: ghcr.io/kramersean/k8s-buddy/plant-operator
+          # IfNotPresent, not Always: this image is loaded directly into
+          # kind's node containerd via `make kind-load-operator` and is never
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
+          # resolve.
+          imagePullPolicy: IfNotPresent
+          args:
+            - --metrics-bind-address=:8081
+            - --health-probe-bind-address=:8082
+            - --leader-elect=true
+            # --webhook-port, --webhook-cert-dir, --webhook-service-name, and
+            # the two --*-webhook-configuration-name flags are all left at
+            # their built-in defaults here on purpose: those defaults
+            # (cmd/plant-operator/main.go) already name exactly this
+            # manifest's own Service (webhook-service.yaml) and the two
+            # objects config/webhook/manifests.yaml creates (see
+            # api/v1alpha1/plant_webhook.go's own comment on that three-way
+            # agreement). charts/k8s-buddy overrides all five explicitly,
+            # since its objects are release-scoped rather than these fixed
+            # names.
+          env:
+            # Downward API, not a hardcoded value: lets
+            # cmd/plant-operator/main.go compute the correct DNS SANs for its
+            # self-signed webhook serving certificate (see
+            # docs/adr/0009-webhook-certificate-strategy.md) without this
+            # manifest and that Go code needing to agree on a namespace
+            # string independently. This is the SAME namespace
+            # metadata.namespace above already pins, just made visible to the
+            # container -- not a second source of truth for it.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: probes
+              containerPort: 8082
+              protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            # Where cmd/plant-operator/main.go's certificate bootstrap
+            # (webhookcerts.go) writes tls.crt/tls.key at every process
+            # startup, and where controller-runtime's webhook.Server reads
+            # them back from. emptyDir, not a Secret or PVC: see
+            # docs/adr/0009 for why nothing here needs to survive a restart
+            # -- the certificate (and the caBundle patched onto both webhook
+            # configurations) is regenerated fresh every time this container
+            # starts, so there is nothing to persist.
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: false
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}

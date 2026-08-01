@@ -1,0 +1,157 @@
+{{- if .Values.rbac.create }}
+# Reproduces config/rbac/role.yaml's rules verbatim (generated from
+# internal/controller/plant_controller.go's own +kubebuilder:rbac markers --
+# see that file's own header comment for why it must never be hand-edited
+# independently of the markers it comes from). `make helm-sync-crd` does NOT
+# copy this file the way it copies the CRD -- there is no single generated
+# artifact to diff against here, since this is a Helm template, not a raw
+# manifest -- so a `+kubebuilder:rbac` marker change must be mirrored here
+# by hand. CI's `manifests` job re-renders this chart with `helm template`
+# and diffs its rendered ClusterRole rules against config/rbac/role.yaml's
+# own rules, closing that gap the same way the CRD's own drift gate does.
+#
+# Named "<fullname>-manager-role", NOT the kustomize path's own
+# "plant-operator-role" -- ClusterRole/ClusterRoleBinding are cluster-scoped,
+# so two independent installs of this chart (or one install alongside the
+# kustomize-deployed operator already running in k8s-buddy-system) must
+# never share a name. Release-scoping this name is what makes
+# `helm install <release> -n <ns>` safe to run on a cluster that already has
+# the kustomize path's plant-operator-role installed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-manager-role
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - serviceaccounts
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # The caBundle-patching grant cmd/plant-operator's certificate bootstrap
+  # (docs/adr/0009-webhook-certificate-strategy.md) needs -- resourceNames
+  # here are RELEASE-SCOPED (matching templates/mutatingwebhookconfiguration
+  # .yaml and templates/validatingwebhookconfiguration.yaml's own
+  # metadata.name), unlike every other rule in this ClusterRole, which is a
+  # byte-for-byte mirror of config/rbac/role.yaml's fixed
+  # "plant-operator-*" names. hack/check-helm-rbac-drift.py's own
+  # normalization drops resourceNames from its equality check for exactly
+  # this reason, while still asserting a rule naming
+  # admissionregistration.k8s.io carries SOME non-empty resourceNames on
+  # both sides -- see that script's own comment.
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - mutatingwebhookconfigurations
+      - validatingwebhookconfigurations
+    resourceNames:
+      - {{ include "k8s-buddy.fullname" . }}-mutating-webhook-configuration
+      - {{ include "k8s-buddy.fullname" . }}-validating-webhook-configuration
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+  - apiGroups:
+      - buddy.k8s-buddy.io
+    resources:
+      - plants
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - buddy.k8s-buddy.io
+    resources:
+      - plants/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - buddy.k8s-buddy.io
+    resources:
+      - plants/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - servicemonitors
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+{{- end }}

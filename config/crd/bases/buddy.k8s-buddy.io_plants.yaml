@@ -1,0 +1,325 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: plants.buddy.k8s-buddy.io
+spec:
+  group: buddy.k8s-buddy.io
+  names:
+    categories:
+    - all
+    kind: Plant
+    listKind: PlantList
+    plural: plants
+    shortNames:
+    - pl
+    singular: plant
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.species
+      name: Species
+      type: string
+    - jsonPath: .status.mood
+      name: Mood
+      type: string
+    - jsonPath: .status.healthPercent
+      name: Health
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.desiredReplicas
+      name: Desired
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Plant is the Schema for the plants API. A Plant is a self-contained,
+          self-reporting buddy-api workload: the plant-operator watches it and
+          continuously reconciles a Deployment, Service, ConfigMap, and
+          PodDisruptionBudget to match its spec, then reports the workload's
+          aggregate health back onto Plant.status — turning a plain Deployment into
+          a small demonstration of the Kubernetes control plane.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec is the desired state of the plant, as set by its owner.
+            properties:
+              chaos:
+                description: Chaos configures optional chaos-injection affordances
+                  for this Plant.
+                properties:
+                  enableEndpoints:
+                    default: false
+                    description: |-
+                      EnableEndpoints exposes POST /chaos/readiness on this Plant's pods so
+                      chaos-buddy's readiness-flap mode can reach them. Defaults to false:
+                      a chaos endpoint reachable in an ordinary deployment is a security
+                      finding, so it is opt-in per Plant rather than on by default.
+                    type: boolean
+                type: object
+              image:
+                default: ghcr.io/kramersean/k8s-buddy/buddy-api:dev
+                description: |-
+                  Image is the buddy-api container image the generated Deployment runs,
+                  including its tag.
+
+                  The Pattern accepts the shape of a real image reference — an optional
+                  registry host with an optional port, slash-separated path components,
+                  an optional tag, and an optional @sha256 digest — and nothing else. It
+                  is not a full distribution-spec grammar and does not try to be; its job
+                  is to stop `image: ""`, `image: "my image"`, and a pasted YAML block
+                  from becoming a Deployment that the kubelet rejects at pull time, when
+                  the only symptom is ImagePullBackOff on a Plant whose spec looked fine.
+                maxLength: 512
+                minLength: 1
+                pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*(:[a-zA-Z0-9][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$
+                type: string
+              latencyBudget:
+                default: 150ms
+                description: |-
+                  LatencyBudget is passed to the workload as BUDDY_LATENCY_BUDGET: the
+                  p95 request latency at or above which the workload's own health
+                  scoring bottoms out its latency component at zero.
+                type: string
+              replicas:
+                default: 3
+                description: |-
+                  Replicas is how many leaves this plant grows: the desired replica
+                  count for the generated Deployment. It is a pointer so an unset field
+                  (use the default of 3) is distinguishable from an explicit 0 — the
+                  Minimum marker below makes `replicas: 0` a rejected write rather than
+                  a silent scale-to-zero.
+
+                  The CEL rule below is additive, not a replacement for Minimum=1: it
+                  changes nothing about which values are accepted (Minimum=1 already
+                  rejects 0 on its own), it only attaches this project's own
+                  human-readable message to that specific rejection. Structural schema
+                  validation (both the Minimum keyword and this CEL rule) always runs
+                  before any admission webhook -- see api/v1alpha1/plant_webhook.go's
+                  own validate() comment and docs/adr/0009 -- so a plain `Minimum=1`
+                  alone would surface only the API server's generic "should be greater
+                  than or equal to 1" text, never PlantCustomValidator's own
+                  "plants need at least one leaf", for a bare `kubectl apply` of
+                  `replicas: 0`. Both messages now appear together in the rejection (the
+                  API server aggregates every failing rule into one response); Task 4's
+                  webhook re-asserts the same rule for defense in depth exactly the way
+                  it re-asserts the wateringInterval floor, for the same reason -- see
+                  that file's own comment.
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: plants need at least one leaf
+                  rule: self >= 1
+              resourceProfile:
+                default: small
+                description: |-
+                  ResourceProfile selects the CPU and memory envelope applied to the
+                  generated container: small, medium, or large. Each profile maps to a
+                  fixed requests/limits pair chosen by the operator — this field picks
+                  among them rather than setting raw quantities, so a Plant can never
+                  end up with requests greater than limits or other malformed
+                  combinations.
+                enum:
+                - small
+                - medium
+                - large
+                type: string
+              species:
+                default: fern
+                description: |-
+                  Species is the plant variety. Cosmetic: it flows into the workload's
+                  BUDDY_SPECIES environment variable and shapes what the plant says
+                  about itself in its own /status responses. It has no effect on
+                  scheduling, resources, or health.
+                enum:
+                - fern
+                - cactus
+                - succulent
+                - orchid
+                - fiddle-leaf
+                type: string
+              wateringInterval:
+                default: 30s
+                description: |-
+                  WateringInterval is how often the operator re-reconciles this plant
+                  even when nothing external has changed, so status — mood, health,
+                  readiness — keeps refreshing instead of only updating in reaction to
+                  spec edits or child-resource drift.
+
+                  Bounded at the API level, in two layers, because an unbounded requeue
+                  interval is a denial-of-service knob wearing a friendly name:
+                  `wateringInterval: 1ms` was previously a perfectly valid Plant that
+                  pinned a reconcile worker in a 1ms loop against the API server for as
+                  long as the object existed.
+
+                    - The Pattern admits only whole seconds, minutes, and hours (`45s`,
+                      `5m`, `1h30m`). Milliseconds, microseconds, and nanoseconds are not
+                      expressible at all, so the pathological case is rejected by the
+                      schema itself with a message a user can act on.
+                    - The CEL rule then bounds the parsed value on both ends: at least
+                      30s (the operator's own minRequeueInterval floor, so an admitted
+                      Plant is never silently clamped to something other than what it
+                      asked for) and at most 24h (beyond which "watering" has stopped
+                      meaning anything and a stale status looks like a broken operator).
+
+                  internal/controller's minRequeueInterval remains the second line of
+                  defence, for a Plant constructed directly in Go that never passed
+                  through admission at all.
+                pattern: ^([0-9]+(s|m|h))+$
+                type: string
+                x-kubernetes-validations:
+                - message: wateringInterval must be at least 30s
+                  rule: duration(self) >= duration('30s')
+                - message: wateringInterval must be at most 24h
+                  rule: duration(self) <= duration('24h')
+            type: object
+          status:
+            description: |-
+              Status is the most recently observed state of the plant, as computed
+              by the operator. Consumers should treat it as read-only.
+            properties:
+              conditions:
+                description: |-
+                  Conditions are the standard Kubernetes conditions describing this
+                  Plant's Ready, Progressing, and Degraded state, managed with
+                  meta.SetStatusCondition so transition timestamps stay accurate.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              desiredReplicas:
+                description: |-
+                  DesiredReplicas is the replica count the operator is currently
+                  reconciling towards, mirrored from the generated Deployment's spec
+                  (and therefore reflects Plant.spec.replicas once a reconcile has run).
+                format: int32
+                type: integer
+              healthPercent:
+                description: |-
+                  HealthPercent is ReadyReplicas as a percentage of DesiredReplicas,
+                  rounded to the nearest whole percent. It is 0 whenever DesiredReplicas
+                  is 0, rather than an undefined division.
+                format: int32
+                type: integer
+              lastWatered:
+                description: |-
+                  LastWatered is the timestamp of the most recent reconcile that
+                  changed status. The operator computes a fresh value on every
+                  reconcile, but only writes status — including this field — through
+                  the status subresource when something other than the timestamp
+                  itself actually changed, so a Plant with nothing new to report does
+                  not receive a write merely because a WateringInterval elapsed.
+                format: date-time
+                type: string
+              mood:
+                description: |-
+                  Mood is the plant's derived emotional state (e.g. "leafy", "thirsty",
+                  "wilting"), computed from HealthPercent using the same mood ladder the
+                  buddy-api workload itself uses to describe its own health. Empty
+                  until the first successful reconcile has observed the Deployment.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the value of .metadata.generation the operator
+                  last acted on. Compare it against the Plant's own .metadata.generation
+                  to tell whether the rest of this status reflects the most recent spec
+                  change or an older one still being processed.
+                format: int64
+                type: integer
+              readyReplicas:
+                description: |-
+                  ReadyReplicas is the number of Pods in the generated Deployment
+                  currently reporting Ready, mirrored from the Deployment's own status.
+                format: int32
+                type: integer
+            required:
+            - desiredReplicas
+            - healthPercent
+            - readyReplicas
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: ""
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.readyReplicas
+      status: {}

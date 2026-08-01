@@ -1,0 +1,71 @@
+# Two ConfigMaps with two very different jobs, kept in one file because
+# both are chaos-buddy's non-secret runtime state and a reviewer should see
+# them together:
+#
+#   chaos-buddy-config -- ordinary configuration, consumed via envFrom in
+#     deployment.yaml. Every key here has a documented default in
+#     cmd/chaos-buddy/main.go's loadConfig; this ConfigMap exists so the
+#     demo's configuration is visible and editable as a manifest, mirroring
+#     deploy/kustomize/base/configmap.yaml's own comment for buddy-api.
+#
+#   chaos-buddy-switch -- the kill switch. Its "enabled" key is re-read by
+#     chaos-buddy on every loop iteration (internal/chaos's
+#     PodClient.ReadSwitch), and is the ONLY way to stop chaos without a
+#     redeploy: `kubectl patch configmap chaos-buddy-switch -n
+#     k8s-buddy-plants --type merge -p '{"data":{"enabled":"false"}}'`
+#     takes effect within one CHAOS_INTERVAL, with no rollout involved.
+#     Its name matches CHAOS_CONFIGMAP_NAME's default below AND
+#     rbac.yaml's `resourceNames: ["chaos-buddy-switch"]` restriction on
+#     the Role's configmaps rule -- all three must agree, and changing one
+#     without the other two turns "get configmap" into a 403 the moment
+#     chaos-buddy tries to read it (which, per SwitchPermits's fail-closed
+#     design, means chaos simply stops rather than running unconfirmed).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-buddy-config
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+data:
+  CHAOS_TARGET_NAMESPACE: "k8s-buddy-plants"
+  # Targets the sample Plant `make demo-operator` creates (see the
+  # Makefile's PLANT_LABEL/PLANT_NAME). A CHAOS_LABEL_SELECTOR is required
+  # at startup -- see internal/chaos's ValidateLabelSelector -- there is no
+  # implicit "match everything" for chaos-buddy to fall back to.
+  CHAOS_LABEL_SELECTOR: "buddy.k8s-buddy.io/plant=fernie"
+  CHAOS_MODE: "pod-kill"
+  CHAOS_INTERVAL: "30s"
+  # true by default so an accidental `make deploy-chaos` on any cluster is
+  # inert: chaos-buddy will log every intended action and delete nothing
+  # until this is deliberately flipped to "false" (see
+  # cmd/chaos-buddy/main.go's parseDryRunFlag for exactly how this value
+  # becomes the --dry-run flag's default).
+  CHAOS_DRY_RUN: "true"
+  CHAOS_CONFIGMAP_NAME: "chaos-buddy-switch"
+  CHAOS_LOG_LEVEL: "info"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-buddy-switch
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+data:
+  # Shipped "true" (permitted), not "false": the safety story for a fresh
+  # deploy is CHAOS_DRY_RUN above, not this switch. Keeping the switch
+  # itself "on" by default means the two controls are independently
+  # demonstrable -- dry-run proves the "no redeploy needed to stop real
+  # damage" story, and this key proves the "no redeploy needed to stop
+  # ANY action, real or narrated" story -- without one control masking the
+  # other's own verification.
+  enabled: "true"

@@ -1,0 +1,140 @@
+# THIS FILE HAS A GO TWIN: internal/controller/resources.go's DeploymentFor
+# builds the same hardened buddy-api workload for a Plant, so the operator can
+# reconcile it instead of applying a static manifest. Both descriptions are
+# deliberate and both stay -- see
+# docs/adr/0006-operator-reproduces-base-manifests.md for which is which and
+# why.
+#
+# They must not drift. internal/controller/manifest_drift_test.go parses THIS
+# FILE and asserts, field by field, that the security contexts, probe timings,
+# resource requests/limits, terminationGracePeriodSeconds, imagePullPolicy,
+# and container ports below match what DeploymentFor produces for an
+# equivalent Plant. Tightening a probe or a limit here without doing the same
+# in Go (or vice versa) fails `make test`.
+#
+# The places the two legitimately DIFFER -- the 3-key selector below vs the
+# operator's 2-key one, managed-by, serviceAccountName, the untagged image --
+# are asserted explicitly by that same test, with their reasons, so an
+# unintended change to one of those still fails too.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buddy-api
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: buddy-api
+      app.kubernetes.io/instance: k8s-buddy
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: buddy-api
+        app.kubernetes.io/instance: k8s-buddy
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: k8s-buddy
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: buddy-api
+      automountServiceAccountToken: false
+      # Pod-level seccompProfile is required in addition to the
+      # container-level one below: Pod Security Admission's `restricted`
+      # profile checks for it at both scopes, and setting it only on the
+      # container leaves the pod itself without a default profile.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread the 3 replicas across the cluster's 3 nodes (1 control-plane
+      # + 2 workers -- see deploy/kind/kind-config.yaml) so a single node
+      # failure can never take out more than one replica.
+      # whenUnsatisfiable: ScheduleAnyway (not DoNotSchedule) means the
+      # scheduler still places all replicas even if perfect spread isn't
+      # achievable, e.g. on a single-node cluster -- this is a demo
+      # cluster, not a guarantee the manifest should refuse to schedule
+      # under.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: buddy-api
+              app.kubernetes.io/instance: k8s-buddy
+              app.kubernetes.io/component: api
+      # No lifecycle.preStop hook: the endpoint-propagation delay runs
+      # in-process instead, because this distroless image has no shell for
+      # an exec hook to run in. See docs/adr/0002. 30s leaves room for the
+      # whole sequence (5s BUDDY_SHUTDOWN_DELAY + up to 15s drain +
+      # margin) before the kubelet SIGKILLs the process.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: buddy-api
+          # Untagged on purpose: the tag comes from the `images:`
+          # transformer in kustomization.yaml, which `make deploy`
+          # overrides with the immutable git SHA of the build being
+          # deployed. A mutable tag pinned here would make `kubectl apply
+          # -k` a silent no-op after every rebuild.
+          image: ghcr.io/kramersean/k8s-buddy/buddy-api
+          # IfNotPresent, not Always: this image is loaded directly into
+          # kind's node containerd via `make kind-load` and is never
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
+          # resolve. imagePullPolicy: Always would make every pod start
+          # fail trying (and failing) to pull from a registry that has
+          # nothing at this tag.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: buddy-api-config
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # periodSeconds: 2 / failureThreshold: 2 on readiness means a pod
+          # falling out of (or back into) rotation is visible within ~4s
+          # instead of the 30s a default probe cadence would take -- the
+          # difference between a demo that's watchable in real time and one
+          # that requires narrating "just wait a bit."
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15

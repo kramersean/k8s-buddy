@@ -1,0 +1,25 @@
+# Strategic-merge patch over deploy/kustomize/base/deployment.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buddy-api
+  namespace: k8s-buddy
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: buddy-api
+          # Guaranteed QoS: requests == limits, the inverse of dev's
+          # Burstable profile. No slack means no surprise -- this pod never
+          # gets throttled below what it asked for, and never gets
+          # preferentially evicted ahead of a Burstable/BestEffort neighbor
+          # under node memory pressure (see the kubelet's own QoS-based
+          # eviction ordering).
+          resources:
+            requests:
+              cpu: 150m
+              memory: 128Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi

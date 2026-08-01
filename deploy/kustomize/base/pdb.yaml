@@ -1,0 +1,22 @@
+# With 3 replicas and minAvailable: 2, voluntary disruptions (node drains,
+# `kubectl evict`) can never take down more than one buddy-api pod at a
+# time -- exactly the invariant hack/demo.sh's own `kubectl delete pod`
+# depends on to prove self-healing rather than an outage.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: buddy-api
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: buddy-api
+      app.kubernetes.io/instance: k8s-buddy
+      app.kubernetes.io/component: api

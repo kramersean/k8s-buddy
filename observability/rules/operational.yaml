@@ -1,0 +1,136 @@
+# Operational alerts: PlantDegraded, PlantNotReconciling, and
+# ChaosRunawayDeletions. Unlike slo.yaml, these are not about the SLO's error
+# budget -- they are "is the platform itself healthy" alerts, the kind a
+# runbook (docs/runbook/README.md, Task 5) walks an on-call reader through
+# diagnosing one at a time.
+groups:
+  - name: k8s-buddy-operational-alerts
+    rules:
+      # kube_customresource_status_condition is exposed by kube-state-metrics'
+      # CustomResourceState (CRS) feature, configured in
+      # deploy/observability/values-kube-prometheus-stack.yaml under the
+      # `kube-state-metrics:` subchart key -- kube-state-metrics does not
+      # know about the Plant CRD out of the box, and CRS is the supported,
+      # documented mechanism for exposing an arbitrary CRD's
+      # status.conditions as a gauge without this project hand-rolling its
+      # own metrics exporter for it. The gauge's VALUE is the condition's
+      # own Status field (True/False/Unknown), auto-converted to 1/0/NaN by
+      # kube-state-metrics -- `== 1` below is therefore "Status: True",
+      # never a label match.
+      #
+      # The metric name is a fixed kube-state-metrics literal
+      # ("kube_customresource_<metric-name>") -- it does NOT interpolate the
+      # CRD's Kind the way e.g. kube_pod_status_phase's own "pod" does. What
+      # DOES disambiguate which CRD a given series belongs to (this project
+      # runs only one CRD, but the metric family is shared by any other CRS
+      # config a cluster might add) is the customresource_kind label,
+      # confirmed against the live metric before this rule was committed:
+      # `kube_customresource_status_condition{customresource_kind="Plant",
+      # namespace="k8s-buddy-plants",plant="fernie",reason=
+      # "InsufficientReplicas",type="Degraded"} 1`.
+      - alert: PlantDegraded
+        expr: kube_customresource_status_condition{customresource_kind="Plant", type="Degraded"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plant {{ $labels.namespace }}/{{ $labels.plant }} has been Degraded for over 5 minutes"
+          description: >-
+            Plant {{ $labels.namespace }}/{{ $labels.plant }}'s Degraded
+            condition has been True (reason {{ $labels.reason }}) for at
+            least 5 minutes. Run `kubectl -n {{ $labels.namespace }} describe
+            plant {{ $labels.plant }}` to see the condition's message and
+            recent Events.
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#plantdegraded"
+
+      # "No successful reconcile in 5m" is interpreted as "no NON-ERROR
+      # reconcile in 5m", not literally result="success" -- and that
+      # distinction is load-bearing, not pedantic. PlantReconciler.Reconcile
+      # (internal/controller/plant_controller.go) always returns
+      # ctrl.Result{RequeueAfter: ...} on its normal, healthy path, which
+      # controller-runtime's own metrics package (see
+      # sigs.k8s.io/controller-runtime/pkg/internal/controller/metrics)
+      # buckets under result="requeue_after", NOT result="success" --
+      # "success" only occurs on the early-return paths (Plant not found,
+      # already being deleted, or blocked on an invalid name), which are the
+      # UNCOMMON case for a healthy Plant. An alert gated on
+      # result="success" alone would fire almost constantly against a
+      # perfectly healthy operator, which is worse than not alerting at all.
+      # What actually indicates "the reconcile loop has stopped running" is
+      # the absence of ANY reconcile outcome other than error within the
+      # window.
+      #
+      # `or vector(0)` is not decoration -- without it this alert cannot
+      # fire for the exact failure mode its own description names first: an
+      # operator that is DOWN. controller_runtime_reconcile_total is a
+      # per-process in-memory counter; when the operator pod is gone, the
+      # series itself is gone (no target for Prometheus to have ever
+      # scraped a value from, or a stale one that ages out), and
+      # `sum(increase(<empty>[5m]))` evaluates to an EMPTY VECTOR, not 0.
+      # PromQL's `== 0` against an empty vector returns nothing at all --
+      # confirmed against this cluster's live Prometheus (`sum(increase(...))
+      # ` returns `result: []` for a nonexistent controller label, while
+      # `(sum(...) or vector(0)) == 0` correctly returns 0). Without the
+      # `or vector(0)` fallback, an operator crash produces an alert that
+      # fires for the few minutes the pre-crash series takes to fall out of
+      # the 5m window and then RESOLVES ITSELF while the operator is still
+      # dead -- an alert that clears during the very outage it exists to
+      # detect is worse than one that never fires, because it actively
+      # tells whoever is paged the problem went away. `vector(0)` supplies
+      # the missing zero so `== 0` has something to compare against exactly
+      # when there is truly nothing reconciling.
+      - alert: PlantNotReconciling
+        expr: (sum(increase(controller_runtime_reconcile_total{controller="plant", result!="error"}[5m])) or vector(0)) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "plant-operator has not successfully reconciled any Plant in 5 minutes"
+          description: >-
+            controller_runtime_reconcile_total{controller="plant"} has
+            recorded zero non-error outcomes in the last 5 minutes. Either
+            plant-operator is down (`kubectl -n k8s-buddy-system get pods -l
+            app.kubernetes.io/name=plant-operator`), its leader election is
+            stuck, or every reconcile is erroring (check
+            controller_runtime_reconcile_total{controller="plant",result="error"}
+            and the pod's own logs).
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#plantnotreconciling"
+
+      # chaos-buddy's default CHAOS_INTERVAL is 30s (see
+      # deploy/kustomize/chaos/configmap.yaml), and it performs at most ONE
+      # action per iteration -- so a healthy, default-configured chaos-buddy
+      # never exceeds 2 actions/minute. The threshold below (6/minute,
+      # sustained over 5m) is 3x that steady-state ceiling: enough headroom
+      # that a deliberately faster demo interval doesn't false-positive, but
+      # tight enough to catch the actual failure mode this guards against --
+      # a misconfigured CHAOS_INTERVAL far below its intended floor, or a
+      # bug in the poll loop causing more than one action per iteration --
+      # before it can delete a meaningful fraction of a Plant's pods in a
+      # short window.
+      #
+      # outcome!="dry-run" excludes chaos-buddy's own OutcomeDryRun
+      # (internal/chaos/kube.go: "an action that was decided but not
+      # performed") -- the shipped default is CHAOS_DRY_RUN=true (deploy/
+      # kustomize/chaos/configmap.yaml), so an unfiltered count pages on
+      # dry-run log lines that deleted nothing at all. success and failure
+      # both stay counted: failure means a real delete/flap call was made
+      # and the API server (or the target pod) returned an error -- a real
+      # attempted action, not a simulated one, and arguably the more
+      # alarming case of the two to miss.
+      - alert: ChaosRunawayDeletions
+        expr: sum(rate(buddy_chaos_actions_total{outcome!="dry-run"}[5m])) * 60 > 6
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "chaos-buddy is performing chaos actions far faster than its configured interval implies"
+          description: >-
+            buddy_chaos_actions_total (excluding dry-run) is increasing at
+            {{ printf "%.2f" $value }} actions/minute, more than 3x the
+            steady-state ceiling (2/minute) a default CHAOS_INTERVAL=30s
+            implies. Flip the kill switch off immediately
+            (`kubectl -n k8s-buddy-plants patch configmap
+            chaos-buddy-switch --type=merge -p '{"data":{"enabled":"false"}}'`)
+            and inspect chaos-buddy's CHAOS_INTERVAL and logs before
+            re-enabling.
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#chaosrunawaydeletions"

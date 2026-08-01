@@ -1,0 +1,30 @@
+# kind cluster config for K8s Buddy local development.
+#
+# One control-plane and two worker nodes (three total) so that pod
+# anti-affinity, topology spread constraints, and PodDisruptionBudget
+# behavior have more than one place to actually schedule around -- with a
+# single worker those features would be configured but never exercised.
+#
+# Node image is pinned explicitly to kindest/node:v1.36.1 (kind v0.32.0's
+# default) so cluster creation never silently pulls a newer image.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-buddy
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.1
+    extraPortMappings:
+      # buddy-api NodePort, now and through the rest of Plan 1.
+      - containerPort: 30080
+        hostPort: 30080
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      # Reserved for Grafana's NodePort in a later plan.
+      - containerPort: 30300
+        hostPort: 30300
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+  - role: worker
+    image: kindest/node:v1.36.1
+  - role: worker
+    image: kindest/node:v1.36.1

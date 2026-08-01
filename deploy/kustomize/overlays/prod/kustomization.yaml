@@ -1,0 +1,44 @@
+# prod: tightens the base's already-production-shaped defaults further.
+# The base (deploy/kustomize/base) already ships 3 replicas, a
+# minAvailable: 2 PDB, and topologySpreadConstraints across the 3-node kind
+# topology -- this overlay is deliberately small because most of "prod" is
+# already the base's own posture. What it changes:
+#
+#   1. deployment-prod.yaml -- replicas: 3 (explicit, even though it matches
+#      the base's own default, so this overlay's intent reads standalone
+#      without cross-referencing the base), and a Guaranteed-QoS resource
+#      envelope (requests == limits) -- the inverse of dev's Burstable
+#      profile (see overlays/dev/deployment-dev.yaml): zero burst slack, so
+#      capacity planning is predictable and the kubelet never has a reason
+#      to consider this pod ahead of a Burstable/BestEffort one under node
+#      pressure.
+#   2. The topologySpreadConstraints patch below -- whenUnsatisfiable:
+#      DoNotSchedule instead of the base's ScheduleAnyway. The base's own
+#      comment explains why ScheduleAnyway is right for a demo cluster that
+#      might be single-node; prod inverts that: the whole point of spreading
+#      3 replicas across 3 nodes is that a single node failure can never
+#      take out more than one replica, and ScheduleAnyway lets the scheduler
+#      quietly violate that guarantee (stacking replicas on fewer nodes)
+#      rather than surface it. DoNotSchedule turns "spread failed" into a
+#      visible Pending pod instead of a silent, weaker guarantee.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: deployment-prod.yaml
+  - target:
+      kind: Deployment
+      name: buddy-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/topologySpreadConstraints/0/whenUnsatisfiable
+        value: DoNotSchedule
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

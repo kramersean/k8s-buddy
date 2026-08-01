@@ -1,0 +1,11 @@
+# Strategic-merge patch over deploy/kustomize/base/configmap.yaml: only the
+# one key that changes for dev. Every other key (BUDDY_NAME, BUDDY_SPECIES,
+# the latency/error-rate knobs, ...) is left to the base's own defaults --
+# restating them here would just be a second place they could drift.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buddy-api-config
+  namespace: k8s-buddy
+data:
+  BUDDY_LOG_LEVEL: "debug"

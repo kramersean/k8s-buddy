@@ -1,0 +1,58 @@
+# Tells Prometheus to scrape plant-operator's own controller-runtime metrics
+# (controller_runtime_reconcile_total, workqueue depth, Go runtime stats,
+# ...) via deploy/kustomize/operator/service.yaml's ClusterIP Service.
+#
+# This lives here, in deploy/observability, rather than beside
+# service.yaml in deploy/kustomize/operator, deliberately: the
+# ServiceMonitor CRD (monitoring.coreos.com/v1) only exists once
+# kube-prometheus-stack's CRDs are installed, and `make deploy-operator` must
+# keep working standalone on a cluster that has never installed this stack
+# at all (exactly the state the live cluster was in before this task).
+# Putting this file in the one kustomization that `make observability-install`
+# guarantees runs AFTER the Helm charts (see that target's own comment on
+# ordering) means the CRD is always present by the time this is applied,
+# with no runtime availability check needed the way the operator's own
+# per-Plant ServiceMonitor (ServiceMonitorFor in
+# internal/controller/resources.go) requires one.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: plant-operator
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: plant-operator
+      app.kubernetes.io/instance: plant-operator
+      app.kubernetes.io/component: operator
+  namespaceSelector:
+    matchNames:
+      - k8s-buddy-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      # The endpoint is served over HTTPS with a self-signed certificate
+      # this project has no cert-manager to issue a verifiable chain for
+      # (see cmd/plant-operator/main.go's own comment on that trade-off) --
+      # insecureSkipVerify is the accepted cost of encrypting a
+      # cluster-internal scrape without adding a certificate authority this
+      # project's scope doesn't otherwise need.
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      # Reuses Prometheus's OWN pod-mounted ServiceAccount token as the
+      # bearer credential presented to plant-operator's
+      # filters.WithAuthenticationAndAuthorization check -- no separate
+      # Secret needs to be minted for this. That token belongs to
+      # kube-prometheus-stack's "kube-prometheus-stack-prometheus"
+      # ServiceAccount (see values-kube-prometheus-stack.yaml's own
+      # fullnameOverride), which prometheus-rbac.yaml (this same directory)
+      # authorizes for GET on the non-resource URL /metrics.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token

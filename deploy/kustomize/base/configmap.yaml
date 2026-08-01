@@ -1,0 +1,33 @@
+# Non-secret runtime configuration for buddy-api, consumed via envFrom in
+# deployment.yaml. Every key here has a documented default in
+# cmd/buddy-api/main.go's loadConfig -- this ConfigMap exists so the demo's
+# configuration is visible and editable as a manifest, not because any of
+# these values are required to be set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buddy-api-config
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+data:
+  BUDDY_NAME: "fernie"
+  BUDDY_SPECIES: "fern"
+  # BUDDY_PORT is deliberately NOT set here. The port appears in five
+  # other places in this manifest set -- containerPort, the Service's
+  # targetPort, and the liveness, readiness, and startup probes -- none of
+  # which read this ConfigMap. Exposing it as a tunable would advertise a
+  # knob that, when turned, moves the server to a new port while every
+  # probe keeps polling 8080, and the deployment fails its way into
+  # CrashLoopBackOff. cmd/buddy-api still defaults it to 8080.
+  BUDDY_LOG_LEVEL: "info"
+  BUDDY_LATENCY_BUDGET: "150ms"
+  BUDDY_WORK_ERROR_RATE: "0.05"
+  BUDDY_WORK_MIN_DELAY: "10ms"
+  BUDDY_WORK_MAX_DELAY: "200ms"
+  BUDDY_ENABLE_CHAOS_ENDPOINTS: "false"
+  BUDDY_SHUTDOWN_DELAY: "5s"

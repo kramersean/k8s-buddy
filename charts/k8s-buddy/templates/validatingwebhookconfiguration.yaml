@@ -1,0 +1,31 @@
+# Reproduces config/webhook/manifests.yaml's ValidatingWebhookConfiguration
+# object -- see templates/mutatingwebhookconfiguration.yaml's own header
+# comment for the full reasoning (release-scoped name/service, drift-gated
+# rules, no caBundle here). failurePolicy is Fail here, deliberately
+# different from the mutating webhook's Ignore -- see
+# docs/adr/0009-webhook-certificate-strategy.md for why, and for how an
+# operator outage is recovered from without this ever blocking
+# `kubectl delete plant`.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-validating-webhook-configuration
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+webhooks:
+  - name: vplant-v1alpha1.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ include "k8s-buddy.fullname" . }}-webhook
+        namespace: {{ include "k8s-buddy.namespace" . }}
+        path: /validate-buddy-k8s-buddy-io-v1alpha1-plant
+        port: 443
+    rules:
+      - apiGroups: ["buddy.k8s-buddy.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["plants"]

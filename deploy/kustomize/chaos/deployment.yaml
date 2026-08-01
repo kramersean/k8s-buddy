@@ -1,0 +1,93 @@
+# chaos-buddy itself: a single-replica poll loop, never more than one --
+# two replicas would double the effective chaos rate against the exact
+# same CHAOS_INTERVAL without anything coordinating between them, which is
+# a correctness problem this tool has no reason to take on for a component
+# with no availability requirement of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-buddy
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chaos-buddy
+      app.kubernetes.io/instance: chaos-buddy
+      app.kubernetes.io/component: chaos
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chaos-buddy
+        app.kubernetes.io/instance: chaos-buddy
+        app.kubernetes.io/component: chaos
+        app.kubernetes.io/part-of: k8s-buddy
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: chaos-buddy
+      # Unlike every generated Plant workload (automountServiceAccountToken:
+      # false -- see deploy/kustomize/base/serviceaccount.yaml), this pod's
+      # whole job is calling the Kubernetes API: listing and deleting pods,
+      # reading the kill-switch ConfigMap, and emitting Events. Leaving
+      # this unset (defaulting to true, the mounted token) is deliberate,
+      # the same posture plant-operator's own Deployment takes -- and
+      # rbac.yaml is what actually bounds what that mounted token can do.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: chaos-buddy
+          # Untagged on purpose, same reasoning as every other Deployment
+          # in this repo: the tag comes from the `images:` transformer in
+          # kustomization.yaml, which `make deploy-chaos` overrides with
+          # the immutable git SHA of the build being deployed.
+          image: ghcr.io/kramersean/k8s-buddy/chaos-buddy
+          # IfNotPresent, not Always: this image is loaded directly into
+          # kind's node containerd via `make kind-load-chaos` and is never
+          # pushed anywhere `ghcr.io/kramersean/k8s-buddy` could actually
+          # resolve.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: chaos-buddy-config
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3

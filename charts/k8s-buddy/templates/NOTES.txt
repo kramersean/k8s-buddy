@@ -1,0 +1,68 @@
+K8s Buddy's plant-operator ({{ .Chart.Name }} {{ .Chart.Version }}, app version {{ .Chart.AppVersion }}) is installed as release
+"{{ .Release.Name }}" in namespace "{{ include "k8s-buddy.namespace" . }}".
+
+1. Watch the operator come up:
+
+     kubectl -n {{ include "k8s-buddy.namespace" . }} rollout status deployment/{{ include "k8s-buddy.fullname" . }} --timeout=120s
+     kubectl -n {{ include "k8s-buddy.namespace" . }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+2. The Plant CRD ships in this chart's crds/ directory and was installed
+   before any template that depends on it. Confirm it's there:
+
+     kubectl get crd plants.buddy.k8s-buddy.io
+
+{{- if .Values.plant.enabled }}
+
+3. This release also created a sample Plant, "{{ printf "%s-%s" (include "k8s-buddy.fullname" .) .Values.plant.name }}",
+   in namespace "{{ include "k8s-buddy.plantNamespace" . }}". Watch it come to life:
+
+     kubectl -n {{ include "k8s-buddy.plantNamespace" . }} get plant {{ printf "%s-%s" (include "k8s-buddy.fullname" .) .Values.plant.name }} -w
+
+{{- else }}
+
+3. No Plant was created (plant.enabled defaults to false). Apply one yourself,
+   either one of the project's own samples:
+
+     kubectl apply -f config/samples/plant-fernie.yaml
+
+   or by re-running this install with the sample turned on:
+
+     helm upgrade {{ .Release.Name }} charts/k8s-buddy -n {{ include "k8s-buddy.namespace" . }} \
+       --reuse-values --set plant.enabled=true
+
+   Either way, watch it come to life:
+
+     kubectl -n k8s-buddy-plants get plants -w
+{{- end }}
+
+4. If you also installed the observability stack (`make observability-install`
+   -- see deploy/observability/), Grafana is reachable without a port-forward
+   at:
+
+     http://localhost:30300
+
+   (NodePort 30300, wired in deploy/kind/kind-config.yaml's extraPortMappings.)
+   Default credentials: admin / <the generated password> -- retrieve it with:
+
+     make grafana-port-forward
+
+5. To remove this release:
+
+     helm uninstall {{ .Release.Name }} -n {{ include "k8s-buddy.namespace" . }}
+
+   The CRD itself is NOT removed by `helm uninstall` (Helm's own convention:
+   another release could still reference it, and deleting a CRD deletes
+   every Custom Resource of that kind cluster-wide). Remove it explicitly,
+   understanding that this deletes every Plant on the cluster:
+
+     kubectl delete crd plants.buddy.k8s-buddy.io
+
+{{- if .Values.namespace.create }}
+
+   The "{{ include "k8s-buddy.namespace" . }}" namespace this release created also
+   survives `helm uninstall` -- Helm never deletes Namespace-kind resources on
+   uninstall, even ones it created, so it will be left behind, empty. Remove
+   it yourself if you don't want it lingering:
+
+     kubectl delete namespace {{ include "k8s-buddy.namespace" . }}
+{{- end }}

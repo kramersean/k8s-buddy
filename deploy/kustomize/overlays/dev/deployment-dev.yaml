@@ -1,0 +1,31 @@
+# Strategic-merge patch over deploy/kustomize/base/deployment.yaml.
+# kustomize matches this to the base Deployment by apiVersion/kind/
+# metadata.name/metadata.namespace alone -- no `target:` selector needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buddy-api
+  namespace: k8s-buddy
+spec:
+  # 1 replica: cheap to schedule, and honest about what a single-developer
+  # kind cluster actually needs -- the base's 3 is sized for the
+  # topologySpreadConstraints/PDB story `hack/demo.sh` tells, not for daily
+  # dev-loop iteration.
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: buddy-api
+          # Burstable QoS (requests well below limits), the inverse of
+          # prod's Guaranteed profile (see overlays/prod/deployment-prod.yaml):
+          # a dev loop wants generous headroom for an attached debugger or
+          # profiler to spike CPU/memory without being throttled or OOM-killed
+          # mid-session, and doesn't need the predictability tight requests
+          # buy in exchange.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

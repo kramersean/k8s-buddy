@@ -1,0 +1,116 @@
+# The SLO from the platform plan's Global Constraints: buddy-api targets 99%
+# availability of /work over 30 days, where "good" is any non-5xx response.
+# Implemented as multi-window, multi-burn-rate alerting (the Google SRE
+# workbook's own recommended shape) rather than a single static error-rate
+# threshold, because a static threshold is either too sensitive (paging on a
+# blip that would never actually exhaust the 30-day error budget) or too
+# slow (missing a real outage until it's already blown the budget).
+#
+# Two alerts, both required to agree with the runbook Task 5 will create at
+# docs/runbook/README.md -- the burn-rate multipliers here (14.4x, 6x) and
+# the ones documented there must never drift apart:
+#
+#   - page  (BuddyAPIWorkErrorBudgetBurnPage): a 14.4x burn rate sustained
+#     over BOTH a 1h and a 5m window would exhaust the entire 30-day error
+#     budget in 2 days. Fast and severe -- wake someone up.
+#   - ticket (BuddyAPIWorkErrorBudgetBurnTicket): a 6x burn rate sustained
+#     over BOTH a 6h and a 30m window would exhaust the budget in 5 days.
+#     Slower, less severe -- file a ticket, no page.
+#
+# Requiring BOTH the long window AND the short window to exceed the
+# threshold simultaneously is what makes this "multi-window": the long
+# window filters out a single short, sharp spike (which the short window
+# alone would page on), and the short window makes the alert clear quickly
+# once the real problem is fixed, instead of the long window's own slow
+# decay keeping it firing for hours after recovery.
+#
+# The four *_ratio recording rules below exist so the two alert expressions
+# stay short: an enormous inlined rate()-over-rate() expression, repeated
+# twice per alert (once for each window) with no name of its own, is exactly
+# the kind of PromQL a reviewer has to mentally re-derive from scratch every
+# time they read it. A named recording rule is also unit-testable with
+# promtool's own rule-test format and reusable by any future dashboard panel
+# that wants the same ratio.
+groups:
+  - name: buddy-api-slo-recording-rules
+    rules:
+      # "Good" is any non-5xx response to /work (buddy_http_requests_total
+      # carries the real HTTP status code in its `code` label, unlike
+      # buddy_work_requests_total's business-level "outcome" label -- the
+      # SLO is defined in terms of what the CALLER actually received, so
+      # this is the metric that has to answer it). One pair of rules
+      # (requests, bad requests) per window, at every window either alert
+      # needs.
+      - record: buddy_api:work_requests:rate5m
+        expr: sum(rate(buddy_http_requests_total{path="/work"}[5m]))
+      - record: buddy_api:work_requests_bad:rate5m
+        expr: sum(rate(buddy_http_requests_total{path="/work",code=~"5.."}[5m]))
+      - record: buddy_api:work_error_ratio:rate5m
+        expr: buddy_api:work_requests_bad:rate5m / buddy_api:work_requests:rate5m
+
+      - record: buddy_api:work_requests:rate30m
+        expr: sum(rate(buddy_http_requests_total{path="/work"}[30m]))
+      - record: buddy_api:work_requests_bad:rate30m
+        expr: sum(rate(buddy_http_requests_total{path="/work",code=~"5.."}[30m]))
+      - record: buddy_api:work_error_ratio:rate30m
+        expr: buddy_api:work_requests_bad:rate30m / buddy_api:work_requests:rate30m
+
+      - record: buddy_api:work_requests:rate1h
+        expr: sum(rate(buddy_http_requests_total{path="/work"}[1h]))
+      - record: buddy_api:work_requests_bad:rate1h
+        expr: sum(rate(buddy_http_requests_total{path="/work",code=~"5.."}[1h]))
+      - record: buddy_api:work_error_ratio:rate1h
+        expr: buddy_api:work_requests_bad:rate1h / buddy_api:work_requests:rate1h
+
+      - record: buddy_api:work_requests:rate6h
+        expr: sum(rate(buddy_http_requests_total{path="/work"}[6h]))
+      - record: buddy_api:work_requests_bad:rate6h
+        expr: sum(rate(buddy_http_requests_total{path="/work",code=~"5.."}[6h]))
+      - record: buddy_api:work_error_ratio:rate6h
+        expr: buddy_api:work_requests_bad:rate6h / buddy_api:work_requests:rate6h
+
+  - name: buddy-api-slo-alerts
+    rules:
+      # 14.4 * (1 - 0.99) = 0.144. A ratio dividing zero total requests by
+      # zero produces NaN in PromQL, and NaN > 0.144 is always false -- so
+      # this alert simply cannot fire during a window with no /work traffic
+      # at all, which is the correct behavior (no traffic means no error
+      # budget is being burned, not an undefined one).
+      - alert: BuddyAPIWorkErrorBudgetBurnPage
+        expr: |
+          buddy_api:work_error_ratio:rate1h > (14.4 * 0.01)
+          and
+          buddy_api:work_error_ratio:rate5m > (14.4 * 0.01)
+        for: 2m
+        labels:
+          severity: page
+          slo: buddy-api-work-availability
+        annotations:
+          summary: "buddy-api /work is burning its 30-day error budget at 14.4x (page)"
+          description: >-
+            The /work error ratio (non-2xx/3xx/4xx responses over total) has
+            exceeded a 14.4x burn rate across BOTH the 1h and 5m windows. At
+            this rate the entire 30-day, 99%-availability error budget is
+            exhausted in about 2 days. Current 5m ratio:
+            {{ printf "%.4f" $value }}.
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnpage"
+
+      # 6 * (1 - 0.99) = 0.06.
+      - alert: BuddyAPIWorkErrorBudgetBurnTicket
+        expr: |
+          buddy_api:work_error_ratio:rate6h > (6 * 0.01)
+          and
+          buddy_api:work_error_ratio:rate30m > (6 * 0.01)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: buddy-api-work-availability
+        annotations:
+          summary: "buddy-api /work is burning its 30-day error budget at 6x (ticket)"
+          description: >-
+            The /work error ratio has exceeded a 6x burn rate across BOTH the
+            6h and 30m windows. At this rate the 30-day error budget is
+            exhausted in about 5 days -- slower and less severe than the page
+            alert, file a ticket rather than paging. Current 30m ratio:
+            {{ printf "%.4f" $value }}.
+          runbook_url: "https://github.com/kramersean/k8s-buddy/blob/main/docs/runbook/README.md#buddyapiworkerrorbudgetburnticket"

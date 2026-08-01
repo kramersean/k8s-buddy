@@ -1,0 +1,41 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gosec
+    - misspell
+    - unconvert
+    - unparam
+    - bodyclose
+    - errorlint
+    - gocritic
+    - ineffassign
+    - unused
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+run:
+  timeout: 5m
+  # internal/controller/{suite,plant_controller,counting_client}_test.go are
+  # gated behind this tag (see Task 4) so `make test` doesn't need a real
+  # kube-apiserver. Without it here, `golangci-lint run ./...` (no -tags)
+  # never even sees those files, and the envtest suite could accumulate
+  # compile errors or lint violations invisibly between runs of
+  # `make test-envtest`. Listing the tag here costs nothing at lint time --
+  # it's compile-only, no control plane involved.
+  build-tags:
+    - envtest

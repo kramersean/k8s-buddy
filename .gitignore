@@ -1,6 +1,10 @@
 # Binaries
 bin/
 dist/
+
+# Generated build scratch (e.g. the image-pinning kustomize overlay
+# `make deploy` renders)
+.build/
 *.exe
 *.dll
 *.so
@@ -35,3 +39,6 @@ kubeconfig.*
 charts/**/charts/
 charts/**/Chart.lock
 *.tgz
+
+# SDD orchestration scratch (ledger, briefs, review packages)
+.superpowers/

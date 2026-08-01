@@ -1,0 +1,103 @@
+suite: plant-operator Deployment
+templates:
+  - deployment.yaml
+release:
+  name: k8s-buddy
+  namespace: k8s-buddy-system
+tests:
+  - it: renders a Deployment with the default image
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/kramersean/k8s-buddy/plant-operator:dev
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: renders the full hardened container securityContext, matching deploy/kustomize/operator/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 65532
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: ["ALL"]
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: renders the pod-level securityContext
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 65532
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: replicaCount propagates to spec.replicas
+    set:
+      replicaCount: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: replicaCount defaults to 1
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: a custom image repository and tag both render
+    set:
+      image.repository: ghcr.io/example/plant-operator
+      image.tag: v1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/plant-operator:v1.2.3
+
+  - it: resources.requests/limits propagate
+    set:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 256Mi
+
+  - it: disabling leader election flips --leader-elect to false
+    set:
+      leaderElection.enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --leader-elect=false
+
+  - it: the ServiceAccount token is left mounted (unlike every generated Plant workload), matching the operator's own deliberate posture
+    asserts:
+      - notExists:
+          path: spec.template.spec.automountServiceAccountToken

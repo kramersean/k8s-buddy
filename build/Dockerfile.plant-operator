@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for plant-operator. Mirrors build/Dockerfile.buddy-api
+# exactly -- see that file's own comments for the full reasoning behind every
+# choice below; only the binary and image identity differ.
+#
+# Build args:
+#   VERSION -- injected into main.version via -ldflags -X (see cmd/plant-operator/main.go)
+#   COMMIT  -- injected into main.commit via -ldflags -X
+# Both default to "dev"/"unknown" to match the Go source defaults if the
+# caller (normally `make docker-build-operator`) omits them.
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+# --platform=$BUILDPLATFORM pins this stage to the architecture of the
+# machine running the build, never the target's, so a multi-arch build cross-
+# compiles instead of running the whole toolchain through QEMU. See
+# build/Dockerfile.buddy-api's own comment for the full reasoning.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+# Copy only the dependency manifests first so `go mod download` is cached
+# across builds and only re-runs when go.mod/go.sum actually change --
+# editing application source must not invalidate this layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Now bring in the rest of the source and build. plant-operator imports
+# api/ and internal/controller/ in addition to cmd/ -- buddy-api never
+# touches either.
+COPY api/ ./api/
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+# TARGETOS/TARGETARCH come from BuildKit and name the image being produced,
+# not the machine producing it. CGO_ENABLED=0 is what makes cross-compiling
+# free here: with no C toolchain in play, the Go compiler emits a fully
+# static binary for any GOOS/GOARCH pair without needing a cross-linker.
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -o /out/plant-operator \
+    ./cmd/plant-operator
+
+# ---------------------------------------------------------------------------
+# Final
+# ---------------------------------------------------------------------------
+# distroless/static-debian12:nonroot ships no shell, no package manager, and
+# no libc -- just CA certs, tzdata, and a passwd entry for uid/gid 65532. See
+# docs/adr/0005 for the base-image choice, made for buddy-api and reused here
+# for the same reasons: a smaller attack surface than anything with a shell
+# a compromised container could exec into.
+#
+# This stage contains no RUN instruction, only a COPY of an
+# already-cross-compiled binary, so nothing built for the target
+# architecture ever executes during the build -- no QEMU/binfmt handler
+# needed for the multi-arch build in CI.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/kramersean/k8s-buddy" \
+      org.opencontainers.image.title="plant-operator" \
+      org.opencontainers.image.description="K8s Buddy's Kubernetes operator -- reconciles Plant custom resources into their owned Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount." \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY --from=builder /out/plant-operator /plant-operator
+
+USER 65532:65532
+
+# 8081: metrics. 8082: health/readiness probes. 9443: the admission webhook
+# server (Plan 3 Task 4 -- see cmd/plant-operator/webhookcerts.go and
+# docs/adr/0009-webhook-certificate-strategy.md).
+EXPOSE 8081 8082 9443
+
+ENTRYPOINT ["/plant-operator"]

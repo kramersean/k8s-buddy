@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "k8s-buddy",
+  "description": "Values schema for the k8s-buddy Helm chart. A values.yaml that violates this schema fails `helm install`/`helm template` before anything is rendered.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "replicaCount"],
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "1 is correct for almost every install (leader election makes >1 safe for reconciliation, not useful). >1 is also safe for the admission webhook server -- which is NOT leader-election-gated, so every replica serves webhook traffic -- because each replica's own self-signed CA is APPENDED to (never overwrites) both webhook configurations' caBundle; see cmd/plant-operator/webhookcerts.go's mergeCABundle and docs/adr/0009. Bounded so a typo (e.g. 0 or 99) fails fast rather than producing a scaled-to-zero or absurdly over-scaled operator."
+    },
+
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "$ref": "#/definitions/resourceList" },
+        "limits": { "$ref": "#/definitions/resourceList" }
+      }
+    },
+
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+
+    "podSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runAsNonRoot", "runAsUser", "seccompProfile"],
+      "properties": {
+        "runAsNonRoot": { "type": "boolean", "const": true },
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "seccompProfile": { "$ref": "#/definitions/seccompProfile" }
+      }
+    },
+
+    "securityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runAsNonRoot",
+        "runAsUser",
+        "allowPrivilegeEscalation",
+        "readOnlyRootFilesystem",
+        "capabilities",
+        "seccompProfile"
+      ],
+      "properties": {
+        "runAsNonRoot": { "type": "boolean", "const": true },
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "allowPrivilegeEscalation": { "type": "boolean", "const": false },
+        "readOnlyRootFilesystem": { "type": "boolean", "const": true },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["drop"],
+          "properties": {
+            "drop": {
+              "type": "array",
+              "items": { "type": "string" },
+              "contains": { "const": "ALL" },
+              "minItems": 1
+            },
+            "add": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "seccompProfile": { "$ref": "#/definitions/seccompProfile" }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" }
+      }
+    },
+
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+
+    "leaderElection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "certDir", "allowedImageRegistries"],
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "certDir": { "type": "string", "minLength": 1 },
+        "allowedImageRegistries": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Empty array means allow every registry -- a deliberate opt-out (see values.yaml's own comment), not the default."
+        }
+      }
+    },
+
+    "plant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "name", "species", "replicas", "resourceProfile"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "namespace": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "create": { "type": "boolean" }
+          }
+        },
+        "species": {
+          "type": "string",
+          "enum": ["fern", "cactus", "succulent", "orchid", "fiddle-leaf"],
+          "description": "Must match config/crd/bases/buddy.k8s-buddy.io_plants.yaml's spec.species enum exactly."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Must match the CRD's spec.replicas minimum/maximum exactly (see config/crd/bases)."
+        },
+        "resourceProfile": {
+          "type": "string",
+          "enum": ["small", "medium", "large"],
+          "description": "Must match config/crd/bases/buddy.k8s-buddy.io_plants.yaml's spec.resourceProfile enum exactly."
+        },
+        "image": { "type": "string" },
+        "wateringInterval": { "type": "string" },
+        "latencyBudget": { "type": "string" },
+        "chaos": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enableEndpoints": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  },
+
+  "definitions": {
+    "resourceList": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": { "type": "string", "minLength": 1 },
+        "memory": { "type": "string", "minLength": 1 }
+      }
+    },
+    "seccompProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "RuntimeDefault",
+          "description": "Pinned to RuntimeDefault: this chart's hardened posture (ADR-aligned with every other workload in this repo) does not offer Localhost/Unconfined as a values.yaml-selectable option."
+        },
+        "localhostProfile": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,214 @@
+# Values for the `prometheus-community/kube-prometheus-stack` chart, pinned
+# to 88.0.1 in the Makefile (`make observability-install`). Never installed
+# with `--version latest` -- see the Makefile's own comment on why an
+# unpinned chart version is not reproducible.
+#
+# `fullnameOverride` is pinned to a short, predictable name deliberately:
+# deploy/observability/prometheus-rbac.yaml hardcodes the
+# "kube-prometheus-stack-prometheus" ServiceAccount name it binds to the
+# metrics-reader ClusterRole, derived from this value. Renaming the Helm
+# release without updating `fullnameOverride` to match breaks that binding
+# silently (Prometheus scrapes plant-operator's gated /metrics endpoint and
+# gets 403s instead of 200s), so if you rename the release, grep for
+# `kube-prometheus-stack-prometheus` across deploy/ and fix every hit.
+fullnameOverride: kube-prometheus-stack
+
+defaultRules:
+  create: true
+
+# kind's control plane runs kube-scheduler, kube-controller-manager, and etcd
+# bound to 127.0.0.1 only (no Service exists for kube-prometheus-stack's
+# default ServiceMonitors to select), and kube-proxy's metrics port is not
+# reliably reachable either depending on kind's networking mode. Left
+# enabled, all four show up as permanently DOWN targets in Prometheus --
+# noise that has nothing to do with this project's own components and would
+# muddy the "buddy-api/plant-operator/chaos-buddy targets are UP" story this
+# task's verification is actually about. Disabling them is the standard,
+# widely-documented adjustment for running this chart on kind.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# Disabled deliberately, not merely left at a resource-tuned default like
+# the components below. node-exporter is the one component in this stack
+# that has no narrower posture than `privileged` grants it (hostNetwork,
+# hostPID, hostPath mounts of /proc, /sys, /) -- unlike promtail, which
+# k8s-buddy-observability's `privileged` ceiling exists FOR (there is no
+# way to ship a node-level log collector without hostPath), node-exporter's
+# node CPU/memory/disk metrics are never read by
+# observability/dashboards/k8s-buddy.json or observability/rules/*.yaml --
+# grepped and confirmed empty (no `node_*` metric referenced anywhere in
+# either). Disabling it removes three more privileged pods from the
+# cluster for zero loss to this project's own story: the dashboard, the
+# SLO, and the operational alerts all read buddy_*, kube_*, and
+# controller_runtime_* series, never node-exporter's. (promtail remains the
+# reason this namespace cannot be tightened below `privileged` regardless
+# of this change -- see namespace.yaml's own comment.)
+nodeExporter:
+  enabled: false
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    # No storage spec -> the Prometheus Operator gives the Alertmanager pod
+    # an ephemeral (emptyDir-backed) data directory instead of provisioning a
+    # PersistentVolumeClaim. kind ships only the `standard` (rancher
+    # local-path) StorageClass, and a demo stack has no business asking for
+    # durable storage across pod restarts -- see the Makefile's own comment
+    # on why every piece of this stack is sized to run with none.
+    storage: {}
+
+prometheus:
+  prometheusSpec:
+    replicas: 1
+    # 6h, per the task brief's sizing guidance for a demo stack -- long
+    # enough to hold a chaos run and its recovery for the dashboard
+    # screenshots this plan exists to produce, short enough that the
+    # ephemeral (no-PVC) storage below never has to hold more than a few
+    # hours of samples in memory and on the pod's writable layer.
+    retention: 6h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    # Same reasoning as alertmanagerSpec.storage above: no PVC, an ephemeral
+    # data directory. Prometheus data does not need to survive a pod
+    # restart in a local demo cluster.
+    storageSpec: {}
+    # The four selectors below all default to "only ServiceMonitors/
+    # PodMonitors/PrometheusRules/Probes carrying this Helm release's own
+    # `release: kube-prometheus-stack` label" when left nil. None of the
+    # ServiceMonitors this project creates -- the operator's per-Plant one
+    # (internal/controller/resources.go's ServiceMonitorFor), or the static
+    # ones for plant-operator and chaos-buddy themselves
+    # (deploy/observability/servicemonitor-{operator,chaos}.yaml) -- carry
+    # that label, because they are built independently of this Helm release and
+    # have no reason to know its name. Setting these four to false and
+    # pairing them with an empty (match-everything) namespace selector is
+    # what makes Prometheus discover this project's own ServiceMonitors and
+    # PrometheusRules at all, cluster-wide, regardless of which namespace
+    # they live in or what release label (if any) they carry.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelector: {}
+    ruleSelectorNilUsesHelmValues: false
+    ruleNamespaceSelector: {}
+    probeSelectorNilUsesHelmValues: false
+
+grafana:
+  # NodePort 30300, matching deploy/kind/kind-config.yaml's extraPortMapping
+  # (reserved there since Plan 1) -- reachable at http://localhost:30300 with
+  # no port-forward.
+  service:
+    type: NodePort
+    nodePort: 30300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  # No persistence block: the grafana subchart defaults to
+  # persistence.enabled: false, which is what this project wants -- Grafana
+  # itself is stateless once dashboards are provisioned from
+  # ConfigMaps (see observability/dashboards/k8s-buddy.json and the sidecar
+  # this chart already enables by default), so nothing here needs a PVC.
+  #
+  # adminPassword is deliberately UNSET. Leaving it unset makes the grafana
+  # subchart auto-generate a random password and store it in the
+  # "kube-prometheus-stack-grafana" Secret's `admin-password` key at install
+  # time -- a generated secret, never a hardcoded production-looking
+  # credential, per the task's own constraint. Retrieve it with:
+  #   kubectl -n k8s-buddy-observability get secret kube-prometheus-stack-grafana \
+  #     -o jsonpath='{.data.admin-password}' | base64 -d
+  # `make grafana-port-forward` prints this command.
+  sidecar:
+    datasources:
+      # observability/dashboards/k8s-buddy.json hardcodes
+      # {"type": "prometheus", "uid": "prometheus"} on every one of its nine
+      # targets and its annotation query. That value resolves today only
+      # because "prometheus" happens to be this chart's own GENERATED
+      # default for the datasource it auto-provisions -- an implicit
+      # contract the dashboard's own JSON never states and this values file
+      # never pinned. A future chart upgrade (or a values change elsewhere
+      # in this file) that alters that default would not fail loudly: every
+      # panel would silently render "Datasource prometheus was not found"
+      # instead, which is exactly the failure mode Task 6's clean-room
+      # rebuild exists to catch before a reviewer does. Setting it here
+      # makes the UID this project's OWN pinned decision, matching the
+      # dashboard JSON explicitly, rather than an upstream default the two
+      # files only coincidentally agree on.
+      uid: prometheus
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  # kube-state-metrics has no built-in knowledge of the Plant CRD -- Custom
+  # Resource State (CRS) is the supported mechanism for exposing an
+  # arbitrary CRD's fields as Prometheus metrics without this project
+  # hand-rolling its own exporter for it. This is what
+  # observability/rules/operational.yaml's PlantDegraded alert reads
+  # (kube_customresource_status_condition{customresource_kind="Plant",...} --
+  # the metric family name is a kube-state-metrics literal, it does not
+  # embed the CRD's Kind the way the name here, "status_condition", might
+  # suggest; customresource_kind is the label that disambiguates it).
+  rbac:
+    extraRules:
+      - apiGroups: ["buddy.k8s-buddy.io"]
+        resources: ["plants"]
+        verbs: ["get", "list", "watch"]
+  customResourceState:
+    enabled: true
+    config:
+      kind: CustomResourceStateMetrics
+      spec:
+        resources:
+          - groupVersionKind:
+              group: buddy.k8s-buddy.io
+              version: v1alpha1
+              kind: Plant
+            labelsFromPath:
+              plant: [metadata, name]
+              namespace: [metadata, namespace]
+            metrics:
+              - name: status_condition
+                help: "Plant status condition. Value is the condition's own Status field (True=1, False=0, Unknown=NaN)."
+                each:
+                  type: Gauge
+                  gauge:
+                    path: [status, conditions]
+                    labelsFromPath:
+                      type: ["type"]
+                      reason: ["reason"]
+                    valueFrom: ["status"]
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 200m
+      memory: 192Mi

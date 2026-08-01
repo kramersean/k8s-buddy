@@ -1,0 +1,53 @@
+# Two Services in front of the same pods:
+#   buddy-api           -- ClusterIP, the normal in-cluster address other
+#                           components (and later, plant-operator) use.
+#   buddy-api-nodeport  -- NodePort fixed at 30080, matching the
+#                           extraPortMappings in deploy/kind/kind-config.yaml,
+#                           so hack/demo.sh and a host-side curl can reach the
+#                           service without any port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: buddy-api
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buddy-api-nodeport
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080
+      protocol: TCP

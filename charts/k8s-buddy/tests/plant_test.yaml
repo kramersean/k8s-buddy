@@ -1,0 +1,75 @@
+suite: optional sample Plant
+templates:
+  - plant.yaml
+release:
+  name: k8s-buddy
+  namespace: k8s-buddy-system
+tests:
+  - it: plant.enabled defaults to false, so no Plant (and no plants namespace) is rendered
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: plant.enabled=true renders exactly one Plant, no separate namespace by default
+    set:
+      plant.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - containsDocument:
+          kind: Plant
+          apiVersion: buddy.k8s-buddy.io/v1alpha1
+          name: k8s-buddy-sample
+          namespace: k8s-buddy-system
+
+  - it: the sample Plant lands in Release.Namespace by default, never the kustomize path's own k8s-buddy-plants
+    set:
+      plant.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: k8s-buddy-system
+
+  - it: plant spec fields propagate from values
+    set:
+      plant.enabled: true
+      plant.species: cactus
+      plant.replicas: 2
+      plant.resourceProfile: medium
+    asserts:
+      - equal:
+          path: spec.species
+          value: cactus
+      - equal:
+          path: spec.replicas
+          value: 2
+      - equal:
+          path: spec.resourceProfile
+          value: medium
+
+  - it: plant.namespace.create=true also renders the dedicated plants Namespace, PSA restricted
+    set:
+      plant.enabled: true
+      plant.namespace.create: true
+      plant.namespace.name: k8s-buddy-plants
+    asserts:
+      - hasDocuments:
+          count: 2
+      - documentIndex: 0
+        isKind:
+          of: Namespace
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: k8s-buddy-plants
+      - documentIndex: 0
+        equal:
+          path: metadata.labels["pod-security.kubernetes.io/enforce"]
+          value: restricted
+      - documentIndex: 1
+        isKind:
+          of: Plant
+      - documentIndex: 1
+        equal:
+          path: metadata.namespace
+          value: k8s-buddy-plants

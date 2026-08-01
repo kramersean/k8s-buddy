@@ -1,0 +1,38 @@
+# Fronts the operator Deployment's "webhook" containerPort (9443), where
+# cmd/plant-operator/main.go's admission webhook server listens (TLS, using
+# the self-signed certificate webhookcerts.go generates at every process
+# startup -- see docs/adr/0009-webhook-certificate-strategy.md).
+#
+# Name and namespace are NOT incidental: they must match exactly what
+# api/v1alpha1/plant_webhook.go's +kubebuilder:webhook markers bake into
+# config/webhook/manifests.yaml's clientConfig.service (serviceName=
+# plant-operator-webhook, serviceNamespace=k8s-buddy-system), and what
+# cmd/plant-operator's --webhook-service-name flag defaults to -- the API
+# server dials the webhook by resolving THIS Service, in THIS namespace, by
+# exactly that name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: plant-operator-webhook
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+  ports:
+    # 443, not 9443: matches the servicePort=443 baked into
+    # config/webhook/manifests.yaml's clientConfig (the API server always
+    # dials a webhook Service's port 443 convention unless told otherwise),
+    # forwarding to the container's own 9443.
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP

@@ -1,0 +1,42 @@
+# Tells Prometheus to scrape chaos-buddy's three buddy_chaos_* metrics via
+# deploy/kustomize/chaos/service.yaml's ClusterIP Service. See
+# servicemonitor-operator.yaml's own comment for why this lives here
+# (deploy/observability) rather than beside chaos-buddy's own manifests --
+# same reasoning, same ordering guarantee.
+#
+# No bearerTokenFile/tlsConfig here: chaos-buddy's :8080/metrics is a plain
+# promhttp.Handler with no authn/authz filter (unlike plant-operator's
+# controller-runtime-native metrics server, chaos-buddy has no dependency on
+# controller-runtime at all -- see cmd/chaos-buddy/main.go's own doc comment
+# on why its metric set is hand-rolled rather than shared). Gating it the
+# same way would mean hand-building the same TokenReview/SubjectAccessReview
+# machinery filters.WithAuthenticationAndAuthorization already provides for
+# free to a controller-runtime-based process, for a process that has no
+# other reason to talk to the Kubernetes API at the volume that would
+# justify it. chaos-buddy's RBAC (deploy/kustomize/chaos/rbac.yaml) is
+# already the narrowest in this repo by design; its metrics endpoint stays
+# plain HTTP, scraped only from inside the cluster network.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chaos-buddy
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chaos-buddy
+      app.kubernetes.io/instance: chaos-buddy
+      app.kubernetes.io/component: chaos
+  namespaceSelector:
+    matchNames:
+      - k8s-buddy-plants
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
