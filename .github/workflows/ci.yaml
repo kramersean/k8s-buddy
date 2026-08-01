@@ -24,6 +24,7 @@ permissions:
 env:
   IMAGE: ghcr.io/kramersean/k8s-buddy/buddy-api
   OPERATOR_IMAGE: ghcr.io/kramersean/k8s-buddy/plant-operator
+  CHAOS_IMAGE: ghcr.io/kramersean/k8s-buddy/chaos-buddy
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -183,8 +184,8 @@ jobs:
             COMMIT=${{ steps.vars.outputs.commit }}
 
       # Same treatment, same gating, as buddy-api above: a portfolio repo
-      # that multi-arch-builds and pushes one of its two images but not the
-      # other invites the question of why. build/Dockerfile.plant-operator
+      # that multi-arch-builds and pushes some of its images but not others
+      # invites the question of why. build/Dockerfile.plant-operator
       # is cross-compiled the same way (--platform=$BUILDPLATFORM,
       # GOOS/GOARCH=$TARGETOS/$TARGETARCH, COPY-only final stage), so this
       # needs no QEMU either.
@@ -200,13 +201,33 @@ jobs:
             VERSION=${{ steps.vars.outputs.version }}
             COMMIT=${{ steps.vars.outputs.commit }}
 
+      # Same treatment, same gating, as buddy-api and plant-operator above:
+      # chaos-buddy is a shipped component of this project (see AGENTS.md's
+      # "Four Components") and had no build step here at all until now --
+      # README and the Helm chart both present it as first-class, but CI
+      # built and pushed only the other two. build/Dockerfile.chaos-buddy is
+      # cross-compiled the same way (--platform=$BUILDPLATFORM,
+      # GOOS/GOARCH=$TARGETOS/$TARGETARCH, COPY-only final stage), so this
+      # needs no QEMU either.
+      - name: Build chaos-buddy (push only on a push to main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.chaos-buddy
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ env.CHAOS_IMAGE }}:${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
       # SBOM is generated from source (go.sum et al.), not from a built
       # image: a PR build above is intentionally push:false/load:false (a
       # multi-platform buildx build cannot be --load'ed into the local
       # daemon), so on a PR there is no local image to point sbom-action at.
       # A path-based SBOM works identically for both push and PR events, and
-      # covers both binaries' dependencies in one pass since they share a
-      # single go.mod -- a second, per-binary SBOM would be a duplicate of
+      # covers all three binaries' dependencies in one pass since they share
+      # a single go.mod -- a second, per-binary SBOM would be a duplicate of
       # the same source tree, not additional coverage.
       - name: Generate SBOM
         uses: anchore/sbom-action@v0.24.0
@@ -274,9 +295,28 @@ jobs:
             VERSION=${{ steps.vars.outputs.version }}
             COMMIT=${{ steps.vars.outputs.commit }}
 
+      # Same treatment as buddy-api and plant-operator above. Until now,
+      # chaos-buddy was never scanned at all -- a shipped component with no
+      # vulnerability scanning whatsoever. Built locally (load: true) rather
+      # than pulled, for the same fork-PR reason described in this job's own
+      # header comment.
+      - name: Build chaos-buddy image locally for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.chaos-buddy
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.CHAOS_IMAGE }}:scan
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
       # Filesystem scan covers the whole repository (scan-ref: .) in one
-      # pass -- both cmd/buddy-api and cmd/plant-operator source and their
-      # shared go.sum -- so there is only one of these, not one per binary.
+      # pass -- cmd/buddy-api, cmd/plant-operator, and cmd/chaos-buddy source
+      # and their shared go.sum -- so there is only one of these, not one per
+      # binary.
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -298,6 +338,14 @@ jobs:
         with:
           scan-type: image
           image-ref: ${{ env.OPERATOR_IMAGE }}:scan
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy image scan (chaos-buddy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.CHAOS_IMAGE }}:scan
           severity: HIGH,CRITICAL
           exit-code: "1"
 
@@ -502,7 +550,8 @@ jobs:
       # Plant CRD, builds and deploys plant-operator, applies the fernie
       # sample into the PSA-`restricted` k8s-buddy-plants namespace, and --
       # the headline result of Plan 2 -- deletes the Plant and asserts every
-      # one of its six owned children is actually gone. envtest
+      # one of its owned children (six at the time; seven since Plan 3 Task 2
+      # added the ServiceMonitor, see below) is actually gone. envtest
       # (internal/controller's suite, run in the `test` job) cannot
       # demonstrate cascading garbage collection at all: it runs no garbage-
       # collector controller. This is the only place in CI that can.
