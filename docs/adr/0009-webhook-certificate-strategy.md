@@ -197,9 +197,12 @@ design shipped with first) would have been:
   `NotBefore`) and dropping the rest regardless of whether they've expired
   yet: a CA whose process has already exited has no ongoing reason to stay
   trusted. 3 covers one rolling update's old+new overlap (2) plus one full
-  extra generation of margin. Verified live: `caBundle` grew across two
-  consecutive redeploys and settled at 2 entries (old + new CA, both
-  currently-running-equivalent), never exceeding 3.
+  extra generation of margin. Verified live: two consecutive redeploys
+  (a real image rollout, then a `kubectl rollout restart`) each minted a
+  new CA; the `caBundle` count went 2 -> 3 -> 3, capping exactly at
+  `maxRetainedCAs` on the second redeploy rather than growing to 4, with a
+  fresh Plant write succeeding after each restart (proving the newest CA
+  was trusted, not just present).
 - **The alternative not taken: persisting the CA in a Secret.** The
   production-grade answer to "avoid minting a new CA on every restart"
   entirely is to generate the CA once, store it in a `Secret`, and have
