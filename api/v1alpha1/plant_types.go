@@ -89,8 +89,12 @@ type PlantStatus struct {
 	// change or an older one still being processed.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// LastWatered is the timestamp of the most recent successful reconcile,
-	// updated whether or not that reconcile changed anything.
+	// LastWatered is the timestamp of the most recent reconcile that
+	// changed status. The operator computes a fresh value on every
+	// reconcile, but only writes status — including this field — through
+	// the status subresource when something other than the timestamp
+	// itself actually changed, so a Plant with nothing new to report does
+	// not receive a write merely because a WateringInterval elapsed.
 	LastWatered *metav1.Time `json:"lastWatered,omitempty"`
 
 	// Conditions are the standard Kubernetes conditions describing this

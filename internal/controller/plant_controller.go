@@ -11,8 +11,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -33,6 +33,19 @@ import (
 // the Plant until the operator has had a chance to react to it (see
 // Reconcile's deletion branch).
 const plantFinalizer = "buddy.k8s-buddy.io/finalizer"
+
+// minRequeueInterval is the floor Reconcile applies to
+// Plant.Spec.WateringInterval before requeuing. The CRD's own
+// +kubebuilder:default="30s" marker means a Plant that goes through normal
+// API-server defaulting never carries a zero Duration, but a hand-built
+// Plant that bypasses defaulting (as Task 4's envtest suite, and any other
+// Go caller, can construct directly) can carry a genuinely zero
+// WateringInterval. ctrl.Result{RequeueAfter: 0} means "do not requeue on a
+// timer at all," which would silently stop this Plant's status from ever
+// refreshing again — not a loud failure, just a Plant that quietly stops
+// being watered. Flooring at minRequeueInterval keeps periodic reconciliation
+// alive even for a Plant that never went through defaulting.
+const minRequeueInterval = 30 * time.Second
 
 // Event reasons emitted against a Plant. Emitted sparingly — see Reconcile
 // for exactly when each fires — because an Event on every no-op reconcile
@@ -64,8 +77,8 @@ type PlantReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/status,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/finalizers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;get;list;watch;update;patch;delete
@@ -76,8 +89,6 @@ type PlantReconciler struct {
 // comment and this package's task brief for the exact six-step flow;
 // summarized inline at each step below.
 func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	// Step 1: fetch the Plant. A NotFound here means it was already
 	// deleted (and, since the finalizer is gone by the time that happens,
 	// there is nothing left for this reconciler to do) — not an error
@@ -128,14 +139,20 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// subresource only — never via a plain Update on the main object,
 	// which would let the operator race a user's own concurrent edits
 	// to spec/metadata instead of touching only the fields it owns.
-	if err := r.reconcileStatus(ctx, plant, deployment, log); err != nil {
+	if err := r.reconcileStatus(ctx, plant, deployment); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Step 6: come back in WateringInterval regardless of whether
 	// anything changed this pass, so status — mood, health, readiness —
-	// keeps refreshing even when nothing external has changed.
-	return ctrl.Result{RequeueAfter: plant.Spec.WateringInterval.Duration}, nil
+	// keeps refreshing even when nothing external has changed. Floored at
+	// minRequeueInterval — see its own comment — for a hand-built Plant
+	// whose WateringInterval never went through API-server defaulting.
+	requeueAfter := plant.Spec.WateringInterval.Duration
+	if requeueAfter <= 0 {
+		requeueAfter = minRequeueInterval
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // reconcileDelete runs finalizer cleanup for a Plant whose DeletionTimestamp
@@ -250,6 +267,27 @@ func objectMeta(name, namespace string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: name, Namespace: namespace}
 }
 
+// mergeLabels returns existing with owned's keys set to owned's values,
+// preserving any key existing carries that owned does not. Every mutate*
+// function below uses this instead of a plain `obj.Labels = desired.Labels`
+// assignment specifically so a label a human (`kubectl label`) or another
+// controller has added to a child this operator manages survives the next
+// reconcile instead of being silently deleted by it — this operator owns
+// the six LabelsFor keys, not the whole label map. Annotations are left
+// alone entirely by every mutate* function (not merged, not touched), which
+// is the more conservative default for a field this operator doesn't
+// generate any values for in the first place.
+func mergeLabels(existing, owned map[string]string) map[string]string {
+	merged := make(map[string]string, len(existing)+len(owned))
+	for k, v := range existing {
+		merged[k] = v
+	}
+	for k, v := range owned {
+		merged[k] = v
+	}
+	return merged
+}
+
 // mutateDeployment sets deployment's fields to those DeploymentFor(plant)
 // describes, owning only the fields the operator manages.
 //
@@ -269,13 +307,13 @@ func (r *PlantReconciler) mutateDeployment(plant *buddyv1alpha1.Plant, deploymen
 		return fmt.Errorf("setting owner reference on deployment: %w", err)
 	}
 
-	deployment.Labels = desired.Labels
+	deployment.Labels = mergeLabels(deployment.Labels, desired.Labels)
 
 	if deployment.Spec.Selector == nil {
 		deployment.Spec.Selector = desired.Spec.Selector
 	}
 	deployment.Spec.Replicas = desired.Spec.Replicas
-	deployment.Spec.Template.Labels = desired.Spec.Template.Labels
+	deployment.Spec.Template.Labels = mergeLabels(deployment.Spec.Template.Labels, desired.Spec.Template.Labels)
 
 	podSpec := &deployment.Spec.Template.Spec
 	desiredPodSpec := desired.Spec.Template.Spec
@@ -292,19 +330,29 @@ func (r *PlantReconciler) mutateDeployment(plant *buddyv1alpha1.Plant, deploymen
 // matched by name, leaving any container-level field neither builder sets
 // (e.g. TerminationMessagePath, TerminationMessagePolicy — both defaulted
 // by the API server) untouched on a container that already exists. A
-// container present in desired but not yet in existing (the create path,
-// or a hypothetical future second container) is appended as-is: there is
-// nothing previously defaulted to preserve for a container the API server
-// has never seen.
+// container present in desired but not yet in existing (the create path) is
+// appended as-is: there is nothing previously defaulted to preserve for a
+// container the API server has never seen.
+//
+// Containers present in existing but absent from desired are preserved
+// unchanged and appended after every desired container — this operator only
+// manages the single buddy-api container DeploymentFor describes, but a
+// mutating admission webhook injecting a sidecar (a service mesh proxy, a
+// log shipper) is a normal thing for a cluster to do to a Pod template this
+// operator doesn't control end to end. Dropping that container here on the
+// very next reconcile would fight the webhook on every single pass instead
+// of coexisting with it.
 func mergeContainers(existing, desired []corev1.Container) []corev1.Container {
-	byName := make(map[string]int, len(existing))
+	existingByName := make(map[string]int, len(existing))
 	for i, c := range existing {
-		byName[c.Name] = i
+		existingByName[c.Name] = i
 	}
+	desiredByName := make(map[string]bool, len(desired))
 
-	merged := make([]corev1.Container, 0, len(desired))
+	merged := make([]corev1.Container, 0, len(existing)+len(desired))
 	for _, want := range desired {
-		if i, ok := byName[want.Name]; ok {
+		desiredByName[want.Name] = true
+		if i, ok := existingByName[want.Name]; ok {
 			have := existing[i]
 			have.Image = want.Image
 			have.ImagePullPolicy = want.ImagePullPolicy
@@ -320,6 +368,13 @@ func mergeContainers(existing, desired []corev1.Container) []corev1.Container {
 		}
 		merged = append(merged, want)
 	}
+
+	for _, have := range existing {
+		if !desiredByName[have.Name] {
+			merged = append(merged, have)
+		}
+	}
+
 	return merged
 }
 
@@ -337,7 +392,7 @@ func (r *PlantReconciler) mutateService(plant *buddyv1alpha1.Plant, service *cor
 		return fmt.Errorf("setting owner reference on service: %w", err)
 	}
 
-	service.Labels = desired.Labels
+	service.Labels = mergeLabels(service.Labels, desired.Labels)
 	service.Spec.Type = desired.Spec.Type
 	service.Spec.Selector = desired.Spec.Selector
 	service.Spec.Ports = desired.Spec.Ports
@@ -346,9 +401,10 @@ func (r *PlantReconciler) mutateService(plant *buddyv1alpha1.Plant, service *cor
 }
 
 // mutateConfigMap sets configMap's fields to those ConfigMapFor(plant)
-// describes. Unlike the Deployment and Service, a ConfigMap has no
+// describes. Unlike the Deployment and Service, a ConfigMap's Data has no
 // server-defaulted fields for this operator's builder to accidentally
-// clobber, so Data and Labels are safe to assign wholesale.
+// clobber, so it's safe to assign wholesale (Labels still goes through
+// mergeLabels, same as every other child).
 func (r *PlantReconciler) mutateConfigMap(plant *buddyv1alpha1.Plant, configMap *corev1.ConfigMap) error {
 	desired := ConfigMapFor(plant)
 
@@ -356,7 +412,7 @@ func (r *PlantReconciler) mutateConfigMap(plant *buddyv1alpha1.Plant, configMap 
 		return fmt.Errorf("setting owner reference on configmap: %w", err)
 	}
 
-	configMap.Labels = desired.Labels
+	configMap.Labels = mergeLabels(configMap.Labels, desired.Labels)
 	configMap.Data = desired.Data
 
 	return nil
@@ -373,7 +429,7 @@ func (r *PlantReconciler) mutatePodDisruptionBudget(plant *buddyv1alpha1.Plant, 
 		return fmt.Errorf("setting owner reference on poddisruptionbudget: %w", err)
 	}
 
-	pdb.Labels = desired.Labels
+	pdb.Labels = mergeLabels(pdb.Labels, desired.Labels)
 	pdb.Spec.MinAvailable = desired.Spec.MinAvailable
 	if pdb.Spec.Selector == nil {
 		pdb.Spec.Selector = desired.Spec.Selector
@@ -394,7 +450,14 @@ func (r *PlantReconciler) mutatePodDisruptionBudget(plant *buddyv1alpha1.Plant, 
 // Plant it manages — the single most common operator defect. The
 // `if !statusChanged(...) { return nil }` below is the line that turns that
 // guard into an actual skipped write.
-func (r *PlantReconciler) reconcileStatus(ctx context.Context, plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment, log logr.Logger) error {
+//
+// Like reconcileDelete, the logger here is derived from ctx via
+// logf.FromContext rather than threaded through as a parameter — every
+// method in this file that needs to log follows that same convention, so
+// none of them need an extra argument just to log.
+func (r *PlantReconciler) reconcileStatus(ctx context.Context, plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) error {
+	log := logf.FromContext(ctx)
+
 	oldStatus := plant.Status
 	newStatus := computeStatus(plant, deployment)
 

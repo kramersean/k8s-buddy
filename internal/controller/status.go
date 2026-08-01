@@ -109,6 +109,17 @@ func computeStatus(plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) bu
 // hand-constructed Plant (as Task 4's envtest suite and this package's own
 // tests build) may bypass API-server defaulting, so this stays nil-safe
 // rather than assuming the pointer is always set.
+//
+// This deliberately reads plant.Spec.Replicas rather than the observed
+// Deployment's spec.replicas, even though the two agree once a reconcile
+// has actually run. status.desiredReplicas is meant to answer "how many
+// replicas does this Plant want," not "how many did the Deployment last
+// report" — reading the Plant's own spec means a fresh status computed in
+// the same pass that first creates the Deployment (whose spec.replicas the
+// reconciler just set to this same value anyway) already reports the
+// user's intent, rather than a value that could theoretically lag behind
+// it if some other actor (an HPA, a manual scale) had changed the
+// Deployment's replicas directly without the Plant's spec having changed.
 func desiredReplicas(plant *buddyv1alpha1.Plant) int32 {
 	if plant.Spec.Replicas == nil {
 		return defaultReplicas

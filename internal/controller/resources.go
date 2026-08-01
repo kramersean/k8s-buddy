@@ -256,14 +256,32 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 								},
 							},
 							Resources: ResourcesFor(p.Spec.ResourceProfile),
+							// TimeoutSeconds: 1, SuccessThreshold: 1, and
+							// HTTPGet.Scheme: URISchemeHTTP are set
+							// explicitly on all three probes below even
+							// though they equal what the API server would
+							// default anyway if left unset. Task 3's
+							// reconciler diffs this builder's output against
+							// the live cluster object on every reconcile; if
+							// these fields were left unset here, the desired
+							// probe would never equal the server's own
+							// (defaulted) stored probe, and the reconciler
+							// would treat that permanent mismatch as drift
+							// to correct on every single pass — an
+							// unnecessary write, forever. Matching the
+							// server's defaults exactly is what keeps an
+							// unchanged Plant idempotent.
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromString(containerPortName),
+										Path:   "/healthz",
+										Port:   intstr.FromString(containerPortName),
+										Scheme: corev1.URISchemeHTTP,
 									},
 								},
+								TimeoutSeconds:   1,
 								PeriodSeconds:    10,
+								SuccessThreshold: 1,
 								FailureThreshold: 3,
 							},
 							// periodSeconds: 2 / failureThreshold: 2 here
@@ -277,21 +295,27 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/readyz",
-										Port: intstr.FromString(containerPortName),
+										Path:   "/readyz",
+										Port:   intstr.FromString(containerPortName),
+										Scheme: corev1.URISchemeHTTP,
 									},
 								},
+								TimeoutSeconds:   1,
 								PeriodSeconds:    2,
+								SuccessThreshold: 1,
 								FailureThreshold: 2,
 							},
 							StartupProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromString(containerPortName),
+										Path:   "/healthz",
+										Port:   intstr.FromString(containerPortName),
+										Scheme: corev1.URISchemeHTTP,
 									},
 								},
+								TimeoutSeconds:   1,
 								PeriodSeconds:    2,
+								SuccessThreshold: 1,
 								FailureThreshold: 15,
 							},
 						},

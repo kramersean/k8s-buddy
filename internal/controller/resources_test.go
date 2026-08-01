@@ -307,27 +307,61 @@ func TestDeploymentFor(t *testing.T) {
 
 	require.Equal(t, &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http"), Scheme: corev1.URISchemeHTTP},
 		},
+		TimeoutSeconds:   1,
 		PeriodSeconds:    10,
+		SuccessThreshold: 1,
 		FailureThreshold: 3,
 	}, c.LivenessProbe)
 
 	require.Equal(t, &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("http")},
+			HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("http"), Scheme: corev1.URISchemeHTTP},
 		},
+		TimeoutSeconds:   1,
 		PeriodSeconds:    2,
+		SuccessThreshold: 1,
 		FailureThreshold: 2,
 	}, c.ReadinessProbe)
 
 	require.Equal(t, &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http"), Scheme: corev1.URISchemeHTTP},
 		},
+		TimeoutSeconds:   1,
 		PeriodSeconds:    2,
+		SuccessThreshold: 1,
 		FailureThreshold: 15,
 	}, c.StartupProbe)
+}
+
+// TestDeploymentFor_ProbesMatchServerDefaults is a regression test for a
+// real bug caught in Task 3 review: the API server defaults an HTTPGet
+// probe's TimeoutSeconds, SuccessThreshold, and HTTPGet.Scheme to 1, 1, and
+// "HTTP" respectively whenever they're left unset. Task 3's reconciler
+// diffs this builder's output against the live cluster object on every
+// reconcile; if these three fields were ever left zero-valued here again,
+// the comparison would never match a server-defaulted object and every
+// single reconcile of every Plant would issue an unnecessary update --
+// silently reintroducing the write-storm bug the fix in DeploymentFor's own
+// probe comment describes. This test exists so a future edit that drops
+// one of these fields fails loudly instead of merely regressing
+// idempotence in a way only Task 4's write-counting envtest would catch.
+func TestDeploymentFor_ProbesMatchServerDefaults(t *testing.T) {
+	t.Parallel()
+
+	p := testPlant()
+	dep := controller.DeploymentFor(p)
+	c := dep.Spec.Template.Spec.Containers[0]
+
+	for _, probe := range []*corev1.Probe{c.LivenessProbe, c.ReadinessProbe, c.StartupProbe} {
+		require.NotNil(t, probe)
+		require.EqualValues(t, 1, probe.TimeoutSeconds, "TimeoutSeconds must be set explicitly to match the API server's default")
+		require.EqualValues(t, 1, probe.SuccessThreshold, "SuccessThreshold must be set explicitly to match the API server's default")
+		require.NotNil(t, probe.HTTPGet)
+		require.Equal(t, corev1.URISchemeHTTP, probe.HTTPGet.Scheme, "HTTPGet.Scheme must be set explicitly to match the API server's default")
+	}
 }
 
 func TestDeploymentFor_ResourceProfilePropagates(t *testing.T) {
