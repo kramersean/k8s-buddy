@@ -59,8 +59,28 @@ groups:
       # What actually indicates "the reconcile loop has stopped running" is
       # the absence of ANY reconcile outcome other than error within the
       # window.
+      #
+      # `or vector(0)` is not decoration -- without it this alert cannot
+      # fire for the exact failure mode its own description names first: an
+      # operator that is DOWN. controller_runtime_reconcile_total is a
+      # per-process in-memory counter; when the operator pod is gone, the
+      # series itself is gone (no target for Prometheus to have ever
+      # scraped a value from, or a stale one that ages out), and
+      # `sum(increase(<empty>[5m]))` evaluates to an EMPTY VECTOR, not 0.
+      # PromQL's `== 0` against an empty vector returns nothing at all --
+      # confirmed against this cluster's live Prometheus (`sum(increase(...))
+      # ` returns `result: []` for a nonexistent controller label, while
+      # `(sum(...) or vector(0)) == 0` correctly returns 0). Without the
+      # `or vector(0)` fallback, an operator crash produces an alert that
+      # fires for the few minutes the pre-crash series takes to fall out of
+      # the 5m window and then RESOLVES ITSELF while the operator is still
+      # dead -- an alert that clears during the very outage it exists to
+      # detect is worse than one that never fires, because it actively
+      # tells whoever is paged the problem went away. `vector(0)` supplies
+      # the missing zero so `== 0` has something to compare against exactly
+      # when there is truly nothing reconciling.
       - alert: PlantNotReconciling
-        expr: sum(increase(controller_runtime_reconcile_total{controller="plant", result!="error"}[5m])) == 0
+        expr: (sum(increase(controller_runtime_reconcile_total{controller="plant", result!="error"}[5m])) or vector(0)) == 0
         for: 5m
         labels:
           severity: critical
@@ -87,15 +107,25 @@ groups:
       # bug in the poll loop causing more than one action per iteration --
       # before it can delete a meaningful fraction of a Plant's pods in a
       # short window.
+      #
+      # outcome!="dry-run" excludes chaos-buddy's own OutcomeDryRun
+      # (internal/chaos/kube.go: "an action that was decided but not
+      # performed") -- the shipped default is CHAOS_DRY_RUN=true (deploy/
+      # kustomize/chaos/configmap.yaml), so an unfiltered count pages on
+      # dry-run log lines that deleted nothing at all. success and failure
+      # both stay counted: failure means a real delete/flap call was made
+      # and the API server (or the target pod) returned an error -- a real
+      # attempted action, not a simulated one, and arguably the more
+      # alarming case of the two to miss.
       - alert: ChaosRunawayDeletions
-        expr: sum(rate(buddy_chaos_actions_total[5m])) * 60 > 6
+        expr: sum(rate(buddy_chaos_actions_total{outcome!="dry-run"}[5m])) * 60 > 6
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: "chaos-buddy is performing chaos actions far faster than its configured interval implies"
           description: >-
-            buddy_chaos_actions_total is increasing at
+            buddy_chaos_actions_total (excluding dry-run) is increasing at
             {{ printf "%.2f" $value }} actions/minute, more than 3x the
             steady-state ceiling (2/minute) a default CHAOS_INTERVAL=30s
             implies. Flip the kill switch off immediately
