@@ -437,6 +437,27 @@ jobs:
           kubectl -n k8s-buddy-system wait --for=condition=Available deployment/plant-operator --timeout=120s
           kubectl -n k8s-buddy-system get pods -o wide
 
+      # Installs ONLY the ServiceMonitor CRD -- not the full kube-prometheus-
+      # stack Helm release, which this job has no reason to pay the cost of
+      # installing just to prove a CRD-availability check works. Pinned to
+      # the exact prometheus-operator release kube-prometheus-stack 88.0.1
+      # (see the Makefile's KUBE_PROMETHEUS_STACK_VERSION) bundles, per its
+      # own Chart.yaml appVersion -- keeping this pin in sync with that
+      # version, not `main` or `latest`, is exactly the reproducibility
+      # discipline every other pinned tool in this repo already follows.
+      #
+      # Installed BEFORE the Plant below, so PlantReconciler's
+      # serviceMonitorCRDAvailable check (internal/controller/
+      # plant_controller.go) already reports true on fernie's very first
+      # reconcile -- making the seventh child observable from the moment
+      # the "wait for ready" step below succeeds, not on some later,
+      # unasserted reconcile.
+      - name: Install the Prometheus Operator's ServiceMonitor CRD (pinned to prometheus-operator v0.93.0)
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.93.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+          kubectl wait --for condition=established --timeout=60s crd/servicemonitors.monitoring.coreos.com
+
       # The namespace, then the Plant. A Plant applied with no namespace
       # would land in `default`, which carries no Pod Security Admission
       # labels at all -- operator-managed pods would be strictly LESS
@@ -566,22 +587,45 @@ jobs:
       # would pass vacuously if the label selector ever stopped matching,
       # which would make the "after" wait loop below see remaining=0 on its
       # very first iteration and report a false GC pass having proven
-      # nothing at all. Failing loudly here if the count isn't exactly 6 is
+      # nothing at all. Failing loudly here if the count isn't exactly 7 is
       # what keeps the flagship assertion below honest.
       #
-      # SIX, not five: the NetworkPolicy is the sixth owned child, added so
-      # a Plant's pods get the same default-deny posture Plan 1's static
-      # NetworkPolicies give buddy-api.
+      # SEVEN, not six: ServiceMonitor is the seventh owned child, closing
+      # Plan 2's deferral (see docs/adr/0008-deferred-to-plan-3.md). It only
+      # ever appears when the ServiceMonitor CRD is installed, which the
+      # step above guarantees for this job specifically -- envtest's own
+      # suite deliberately never installs that third-party CRD (it proves
+      # the GRACEFUL-SKIP path instead; see
+      # TestReconcile_ServiceMonitorGracefullySkippedWithoutCRD), so this
+      # live-cluster job is the only place the seventh child's actual
+      # creation, and its owner reference, are ever proven.
       - name: Children exist before deletion (the "before" half of the GC proof)
         run: |
           set -euo pipefail
-          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie
-          before="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie --no-headers | wc -l)"
-          if [ "$before" -ne 6 ]; then
-            echo "expected exactly 6 children before delete, saw $before -- the GC proof below would be meaningless" >&2
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol,servicemonitors.monitoring.coreos.com -l buddy.k8s-buddy.io/plant=fernie
+          before="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol,servicemonitors.monitoring.coreos.com -l buddy.k8s-buddy.io/plant=fernie --no-headers | wc -l)"
+          if [ "$before" -ne 7 ]; then
+            echo "expected exactly 7 children before delete, saw $before -- the GC proof below would be meaningless" >&2
             exit 1
           fi
-          echo "confirmed: 6 children present before delete"
+          echo "confirmed: 7 children present before delete"
+
+      # The ServiceMonitor's owner reference, specifically -- the same
+      # proof assertControllerOwnerRef makes in the envtest suite (for the
+      # other six children), now against a real garbage collector's own
+      # notion of ownership rather than just the object PlantReconciler
+      # wrote.
+      - name: Assert the ServiceMonitor carries a controller owner reference back to fernie
+        run: |
+          set -euo pipefail
+          kubectl -n k8s-buddy-plants get servicemonitor fernie -o yaml
+          controller="$(kubectl -n k8s-buddy-plants get servicemonitor fernie \
+            -o jsonpath='{.metadata.ownerReferences[?(@.controller==true)].name}')"
+          if [ "$controller" != "fernie" ]; then
+            echo "expected the ServiceMonitor's controller owner reference to name Plant 'fernie', got: '${controller:-<none>}'" >&2
+            exit 1
+          fi
+          echo "confirmed: servicemonitor/fernie is controller-owned by plant/fernie"
 
       # THE GARBAGE COLLECTION PROOF. This is what envtest structurally
       # cannot show (no garbage-collector controller runs there) and the
@@ -592,21 +636,21 @@ jobs:
       # the operator to unblock it. The children still go away, because they
       # always went away for the same reason: owner references, walked by the
       # garbage collector. That is exactly the point of removing it.
-      - name: Delete the Plant and assert all six children are garbage-collected
+      - name: Delete the Plant and assert all seven children are garbage-collected
         run: |
           set -euo pipefail
           kubectl -n k8s-buddy-plants delete plant fernie --wait=true --timeout=60s
           for i in $(seq 1 30); do
-            remaining="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie --no-headers 2>/dev/null | wc -l)"
+            remaining="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol,servicemonitors.monitoring.coreos.com -l buddy.k8s-buddy.io/plant=fernie --no-headers 2>/dev/null | wc -l)"
             if [ "$remaining" -eq 0 ]; then
-              echo "all six children garbage-collected"
+              echo "all seven children garbage-collected"
               exit 0
             fi
             echo "waiting for garbage collection: $remaining child object(s) remaining (attempt $i/30)"
             sleep 2
           done
           echo "one or more owned children survived Plant deletion:" >&2
-          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie >&2 || true
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol,servicemonitors.monitoring.coreos.com -l buddy.k8s-buddy.io/plant=fernie >&2 || true
           exit 1
 
       - name: RBAC is actually scoped (plant-operator must NOT be able to touch nodes or secrets)
@@ -651,7 +695,7 @@ jobs:
           kubectl -n k8s-buddy-plants get plant fernie -o yaml || true
           kubectl -n k8s-buddy-plants describe plant fernie || true
           echo "=== fernie's owned children (if any remain) ==="
-          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie -o wide || true
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol,servicemonitors.monitoring.coreos.com -l buddy.k8s-buddy.io/plant=fernie -o wide || true
           echo "=== fernie's pods, with the ServiceAccount each actually runs as ==="
           kubectl -n k8s-buddy-plants get pods -l buddy.k8s-buddy.io/plant=fernie \
             -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName,STATUS:.status.phase || true
