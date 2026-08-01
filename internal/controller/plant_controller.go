@@ -400,15 +400,37 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 // broken, Plan 1's demo would be gone, and the only signal would be a
 // reconcile error in the operator's log.
 //
-// Two independent conditions make an object safe to write:
+// Ownership is established in two steps, and THE ORDER IS LOAD-BEARING.
 //
-//   - it carries app.kubernetes.io/managed-by=plant-operator, and
-//   - its controller owner reference (if any) points at THIS Plant.
+//  1. A controller owner reference whose UID equals this Plant's UID is
+//     definitive proof the object is ours, and it is checked FIRST, with no
+//     regard for labels at all. A UID is server-assigned and unforgeable; a
+//     label is a mutable annotation anyone can change with one kubectl
+//     command.
 //
-// The second is what stops a Plant from stealing a differently-named Plant's
-// child, and what makes a child whose owner reference a human has
-// re-pointed elsewhere refuse to be re-seized rather than silently fought
-// over.
+//  2. Only when there is NO matching controller reference does the
+//     app.kubernetes.io/managed-by label get consulted, and only as a way to
+//     recognize an object this operator plainly generated but does not
+//     currently own — the realistic case being a child of a same-named Plant
+//     that was just deleted, still waiting for the garbage collector, while a
+//     replacement Plant is already being reconciled. Adopting that is correct
+//     and self-healing: the stale child's spec.selector is derived from the
+//     Plant's name and is therefore identical, so there is no immutable-field
+//     conflict to hit.
+//
+// Checking the label FIRST, as this function originally did, was a real
+// regression: `kubectl label deploy fernie app.kubernetes.io/managed-by-`
+// wedged that Plant at Degraded/ConflictingResource permanently, refusing to
+// touch its own child over a label mergeLabels would have restored on the
+// very next pass. It was compounded by the informer cache being narrowed by
+// that same label — a stripped child stops producing watch events, so the
+// wedge was not even noticed until the next watering interval. Owner
+// reference first, label second, means a stripped label is now just drift,
+// corrected like any other drift.
+//
+// The refusal itself is unchanged for the case the guard actually exists for:
+// an object with neither a matching controller reference nor the label is
+// somebody else's, and this operator will not touch it.
 //
 // The read goes through r.APIReader, uncached, on purpose — see the field's
 // own comment. A NotFound is the normal, overwhelmingly common case: nothing
@@ -432,21 +454,29 @@ func (r *PlantReconciler) assertNotForeign(ctx context.Context, plant *buddyv1al
 		return fmt.Errorf("checking whether %s %s already exists: %w", kind, key, err)
 	}
 
-	if probe.GetLabels()[LabelManagedBy] != appManagedBy {
-		return &conflictingResourceError{
-			kind: kind, namespace: key.Namespace, name: key.Name,
-			why: fmt.Sprintf("it already exists and does not carry %s=%s, so it was not created by this operator", LabelManagedBy, appManagedBy),
-		}
+	// Step 1: definitive ownership. Nothing a human can do to the object's
+	// labels reaches this check.
+	owner := metav1.GetControllerOf(probe)
+	if owner != nil && owner.UID == plant.UID {
+		return nil
 	}
 
-	if owner := metav1.GetControllerOf(probe); owner == nil || owner.UID != plant.UID {
-		return &conflictingResourceError{
-			kind: kind, namespace: key.Namespace, name: key.Name,
-			why: "it already exists and its controller owner reference does not point at this Plant",
-		}
+	// Step 2: no matching controller reference. The label is the only
+	// remaining evidence, and it is evidence this operator writes and nobody
+	// else does.
+	if probe.GetLabels()[LabelManagedBy] == appManagedBy {
+		return nil
 	}
 
-	return nil
+	provenance := "has no controller owner reference"
+	if owner != nil {
+		provenance = fmt.Sprintf("is controlled by %s/%s", owner.Kind, owner.Name)
+	}
+	return &conflictingResourceError{
+		kind: kind, namespace: key.Namespace, name: key.Name,
+		why: fmt.Sprintf("it already exists, %s, and does not carry %s=%s, so it was not created by this operator",
+			provenance, LabelManagedBy, appManagedBy),
+	}
 }
 
 // objectMeta returns the minimal ObjectMeta CreateOrUpdate needs before its
@@ -711,10 +741,10 @@ func (r *PlantReconciler) mutateNetworkPolicy(plant *buddyv1alpha1.Plant, networ
 // `if !statusChanged(...) { return nil }` below is the line that turns that
 // guard into an actual skipped write.
 //
-// Like reconcileDelete, the logger here is derived from ctx via
-// logf.FromContext rather than threaded through as a parameter — every
-// method in this file that needs to log follows that same convention, so
-// none of them need an extra argument just to log.
+// The logger here is derived from ctx via logf.FromContext rather than
+// threaded through as a parameter — every method in this file that needs to
+// log follows that same convention (see Reconcile itself), so none of them
+// need an extra argument just to log.
 func (r *PlantReconciler) reconcileStatus(ctx context.Context, plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) error {
 	log := logf.FromContext(ctx)
 

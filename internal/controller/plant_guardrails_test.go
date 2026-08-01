@@ -97,6 +97,132 @@ func TestReconcile_RefusesToAdoptForeignDeployment(t *testing.T) {
 		"the pre-existing Deployment's container must be left alone")
 }
 
+// TestReconcile_RestoresStrippedManagedByLabelWithoutDegrading is the
+// regression case for the guard above, and it asserts the OPPOSITE outcome
+// from its own test's namesake -- which is exactly why both have to exist.
+//
+// The first version of assertNotForeign checked the
+// app.kubernetes.io/managed-by label BEFORE the controller owner reference,
+// and refused unconditionally on a mismatch. That made one kubectl command --
+//
+//	kubectl label deploy fernie app.kubernetes.io/managed-by-
+//
+// -- wedge a Plant at Degraded/ConflictingResource permanently: the operator
+// refused to touch its OWN child over a label mergeLabels would have restored
+// on the very next pass. It was compounded by the informer cache being
+// narrowed by that same label, so the stripped child stopped producing watch
+// events and the wedge went unnoticed until the next watering interval.
+//
+// The fix is ordering, not leniency: a controller owner reference whose UID
+// matches this Plant is definitive, unforgeable proof of ownership and is
+// checked first; the label is consulted only when no such reference exists.
+// So a stripped label is now ordinary drift, corrected like any other.
+//
+// TestReconcile_RefusesToAdoptForeignDeployment must keep passing alongside
+// this: an object with NEITHER a matching owner reference NOR the label is
+// still somebody else's, and is still refused.
+func TestReconcile_RestoresStrippedManagedByLabelWithoutDegrading(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "relabelled", 3)
+	createPlant(t, plant)
+
+	waitForChildrenExist(t, plant)
+	waitForStatusPopulated(t, plant)
+	waitForReconcileQuiescence(t)
+
+	key := client.ObjectKey{Namespace: ns, Name: "relabelled"}
+
+	// Sanity-check the starting state, so a failure below cannot be blamed on
+	// the label never having been there.
+	before := &appsv1.Deployment{}
+	require.NoError(t, testClient.Get(testCtx, key, before))
+	require.Equal(t, ManagedByValue, before.Labels[LabelManagedBy])
+	require.NotEmpty(t, metav1.GetControllerOf(before), "the child must be owned before the label is stripped")
+
+	// The kubectl command, in Go: strip the label the guard used to key on.
+	stripped := before.DeepCopy()
+	delete(stripped.Labels, LabelManagedBy)
+	require.NoError(t, testClient.Update(testCtx, stripped))
+
+	// The operator must put it back rather than refuse to touch the object.
+	require.Eventually(t, func() bool {
+		got := &appsv1.Deployment{}
+		if err := testClient.Get(testCtx, key, got); err != nil {
+			return false
+		}
+		return got.Labels[LabelManagedBy] == ManagedByValue
+	}, 15*time.Second, 100*time.Millisecond,
+		"the operator never restored %s on its own child -- it is refusing to adopt an object it created", LabelManagedBy)
+
+	// And it must not have complained about its own child on the way.
+	got := &buddyv1alpha1.Plant{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
+	degraded := conditionsByType(got.Status.Conditions)[ConditionDegraded]
+	require.NotEqual(t, ReasonConflictingResource, degraded.Reason,
+		"stripping a label from a child the Plant demonstrably owns must not raise ConflictingResource: %s", degraded.Message)
+}
+
+// TestReconcile_AdoptsOrphanedChildOfSameNamedPlant covers the second half of
+// the reordering: an object carrying this operator's managed-by label whose
+// controller owner reference does NOT point at the current Plant.
+//
+// The realistic way to reach that state is a delete-then-recreate of the same
+// Plant name. The old Plant's children are orphaned the instant it is
+// deleted, and the garbage collector is asynchronous -- so a replacement Plant
+// created promptly enough finds a same-named child still on the cluster,
+// carrying the label but owned by a UID that no longer exists. Refusing there
+// would make a perfectly ordinary `kubectl delete && kubectl apply` cycle fail
+// intermittently, depending on how fast GC happened to be.
+//
+// Adopting is safe: every child's name and spec.selector are derived from the
+// PLANT'S NAME, so the stale object's immutable fields are identical to the
+// ones the replacement would create, and there is no immutable-field conflict
+// to hit. This test simulates the state directly (envtest runs no garbage
+// collector, so a real delete-recreate could not be staged here) by pointing a
+// child's controller reference at a foreign UID while leaving the label on.
+func TestReconcile_AdoptsOrphanedChildOfSameNamedPlant(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "readopted", 3)
+	createPlant(t, plant)
+
+	waitForChildrenExist(t, plant)
+	waitForStatusPopulated(t, plant)
+	waitForReconcileQuiescence(t)
+
+	key := client.ObjectKey{Namespace: ns, Name: "readopted"}
+	current := &appsv1.Deployment{}
+	require.NoError(t, testClient.Get(testCtx, key, current))
+
+	// Re-point the controller reference at a Plant UID that does not exist,
+	// exactly as an orphaned child of a deleted, same-named Plant would look.
+	orphaned := current.DeepCopy()
+	for i := range orphaned.OwnerReferences {
+		if orphaned.OwnerReferences[i].Controller != nil && *orphaned.OwnerReferences[i].Controller {
+			orphaned.OwnerReferences[i].UID = "00000000-0000-0000-0000-00000000dead"
+		}
+	}
+	orphaned.Spec.Replicas = int32Ptr(99) // drift, so re-adoption is observable
+	require.NoError(t, testClient.Update(testCtx, orphaned))
+
+	// The operator must re-adopt it: owner reference back to the live Plant,
+	// and the drift corrected.
+	require.Eventually(t, func() bool {
+		got := &appsv1.Deployment{}
+		if err := testClient.Get(testCtx, key, got); err != nil {
+			return false
+		}
+		owner := metav1.GetControllerOf(got)
+		return owner != nil && owner.UID == plant.UID && got.Spec.Replicas != nil && *got.Spec.Replicas == 3
+	}, 15*time.Second, 100*time.Millisecond,
+		"the operator never re-adopted a labelled, orphaned child -- a delete-then-recreate of the same Plant name would fail while GC lags")
+
+	got := &buddyv1alpha1.Plant{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
+	degraded := conditionsByType(got.Status.Conditions)[ConditionDegraded]
+	require.NotEqual(t, ReasonConflictingResource, degraded.Reason,
+		"re-adopting an orphaned child this operator generated must not raise ConflictingResource: %s", degraded.Message)
+}
+
 // --- a name too long to be a label value ---------------------------------
 
 // TestReconcile_DegradesOnOverLongName covers the silent-forever failure.
