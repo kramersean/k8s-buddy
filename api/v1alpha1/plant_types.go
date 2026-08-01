@@ -29,6 +29,17 @@ type PlantSpec struct {
 
 	// Image is the buddy-api container image the generated Deployment runs,
 	// including its tag.
+	//
+	// The Pattern accepts the shape of a real image reference — an optional
+	// registry host with an optional port, slash-separated path components,
+	// an optional tag, and an optional @sha256 digest — and nothing else. It
+	// is not a full distribution-spec grammar and does not try to be; its job
+	// is to stop `image: ""`, `image: "my image"`, and a pasted YAML block
+	// from becoming a Deployment that the kubelet rejects at pull time, when
+	// the only symptom is ImagePullBackOff on a Plant whose spec looked fine.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*(:[a-zA-Z0-9][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$"
 	// +kubebuilder:default="ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev"
 	Image string `json:"image,omitempty"`
 
@@ -46,7 +57,30 @@ type PlantSpec struct {
 	// even when nothing external has changed, so status — mood, health,
 	// readiness — keeps refreshing instead of only updating in reaction to
 	// spec edits or child-resource drift.
+	//
+	// Bounded at the API level, in two layers, because an unbounded requeue
+	// interval is a denial-of-service knob wearing a friendly name:
+	// `wateringInterval: 1ms` was previously a perfectly valid Plant that
+	// pinned a reconcile worker in a 1ms loop against the API server for as
+	// long as the object existed.
+	//
+	//   - The Pattern admits only whole seconds, minutes, and hours (`45s`,
+	//     `5m`, `1h30m`). Milliseconds, microseconds, and nanoseconds are not
+	//     expressible at all, so the pathological case is rejected by the
+	//     schema itself with a message a user can act on.
+	//   - The CEL rule then bounds the parsed value on both ends: at least
+	//     30s (the operator's own minRequeueInterval floor, so an admitted
+	//     Plant is never silently clamped to something other than what it
+	//     asked for) and at most 24h (beyond which "watering" has stopped
+	//     meaning anything and a stale status looks like a broken operator).
+	//
+	// internal/controller's minRequeueInterval remains the second line of
+	// defence, for a Plant constructed directly in Go that never passed
+	// through admission at all.
 	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern="^([0-9]+(s|m|h))+$"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s')",message="wateringInterval must be at least 30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('24h')",message="wateringInterval must be at most 24h"
 	// +kubebuilder:default="30s"
 	WateringInterval metav1.Duration `json:"wateringInterval,omitempty"`
 
@@ -103,8 +137,24 @@ type PlantStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// The scale subresource makes `kubectl scale plant fernie --replicas=5` (and
+// `kubectl autoscale`, and any HPA pointed at a Plant) work against a Plant
+// exactly the way they work against a Deployment, rather than requiring
+// `kubectl patch` or `kubectl edit` and a reviewer knowing that spec.replicas
+// happens to be the field to reach for.
+//
+// selectorpath is deliberately EMPTY. It is only consulted by an HPA doing
+// CPU/memory-based autoscaling, which needs a label selector to find the Pods
+// whose metrics it should read — and this project has no metrics-server and
+// no HPA (both are Plan 3, see ADR 0008). Pointing it at a path now would be
+// declaring support for something that cannot work; `kubectl scale` needs
+// only specpath and statuspath. When Plan 3 adds the HPA, this gains
+// selectorpath=.status.selector and PlantStatus gains a string field
+// carrying SelectorFor's serialized form.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.readyReplicas,selectorpath=
 // +kubebuilder:resource:shortName=pl,categories=all
 // +kubebuilder:printcolumn:name="Species",type="string",JSONPath=".spec.species"
 // +kubebuilder:printcolumn:name="Mood",type="string",JSONPath=".status.mood"

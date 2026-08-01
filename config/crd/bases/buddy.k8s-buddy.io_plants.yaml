@@ -73,6 +73,17 @@ spec:
                 description: |-
                   Image is the buddy-api container image the generated Deployment runs,
                   including its tag.
+
+                  The Pattern accepts the shape of a real image reference — an optional
+                  registry host with an optional port, slash-separated path components,
+                  an optional tag, and an optional @sha256 digest — and nothing else. It
+                  is not a full distribution-spec grammar and does not try to be; its job
+                  is to stop `image: ""`, `image: "my image"`, and a pasted YAML block
+                  from becoming a Deployment that the kubelet rejects at pull time, when
+                  the only symptom is ImagePullBackOff on a Plant whose spec looked fine.
+                maxLength: 512
+                minLength: 1
+                pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*(:[a-zA-Z0-9][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$
                 type: string
               latencyBudget:
                 default: 150ms
@@ -128,7 +139,33 @@ spec:
                   even when nothing external has changed, so status — mood, health,
                   readiness — keeps refreshing instead of only updating in reaction to
                   spec edits or child-resource drift.
+
+                  Bounded at the API level, in two layers, because an unbounded requeue
+                  interval is a denial-of-service knob wearing a friendly name:
+                  `wateringInterval: 1ms` was previously a perfectly valid Plant that
+                  pinned a reconcile worker in a 1ms loop against the API server for as
+                  long as the object existed.
+
+                    - The Pattern admits only whole seconds, minutes, and hours (`45s`,
+                      `5m`, `1h30m`). Milliseconds, microseconds, and nanoseconds are not
+                      expressible at all, so the pathological case is rejected by the
+                      schema itself with a message a user can act on.
+                    - The CEL rule then bounds the parsed value on both ends: at least
+                      30s (the operator's own minRequeueInterval floor, so an admitted
+                      Plant is never silently clamped to something other than what it
+                      asked for) and at most 24h (beyond which "watering" has stopped
+                      meaning anything and a stale status looks like a broken operator).
+
+                  internal/controller's minRequeueInterval remains the second line of
+                  defence, for a Plant constructed directly in Go that never passed
+                  through admission at all.
+                pattern: ^([0-9]+(s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: wateringInterval must be at least 30s
+                  rule: duration(self) >= duration('30s')
+                - message: wateringInterval must be at most 24h
+                  rule: duration(self) <= duration('24h')
             type: object
           status:
             description: |-
@@ -249,4 +286,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: ""
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.readyReplicas
       status: {}
