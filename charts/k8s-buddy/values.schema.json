@@ -147,6 +147,21 @@
       }
     },
 
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "certDir", "allowedImageRegistries"],
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "certDir": { "type": "string", "minLength": 1 },
+        "allowedImageRegistries": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Empty array means allow every registry -- a deliberate opt-out (see values.yaml's own comment), not the default."
+        }
+      }
+    },
+
     "plant": {
       "type": "object",
       "additionalProperties": false,

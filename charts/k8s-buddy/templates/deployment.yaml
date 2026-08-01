@@ -36,6 +36,31 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
             - --leader-elect={{ .Values.leaderElection.enabled }}
+            - --webhook-port={{ .Values.webhook.port }}
+            # Kept in lockstep with the volumeMount below by construction --
+            # both read .Values.webhook.certDir, never two independent
+            # literals -- so a values.yaml override of one can never
+            # silently diverge from the other.
+            - --webhook-cert-dir={{ .Values.webhook.certDir }}
+            # This chart's webhook Service, MutatingWebhookConfiguration, and
+            # ValidatingWebhookConfiguration are all RELEASE-SCOPED (see
+            # templates/webhookservice.yaml, templates/
+            # mutatingwebhookconfiguration.yaml, templates/
+            # validatingwebhookconfiguration.yaml), unlike
+            # cmd/plant-operator/main.go's own built-in defaults, which name
+            # the kustomize path's fixed "plant-operator-*" objects -- so,
+            # unlike deploy/kustomize/operator/deployment.yaml, this chart
+            # MUST pass all three names explicitly rather than relying on
+            # those defaults.
+            - --webhook-service-name={{ include "k8s-buddy.fullname" . }}-webhook
+            - --mutating-webhook-configuration-name={{ include "k8s-buddy.fullname" . }}-mutating-webhook-configuration
+            - --validating-webhook-configuration-name={{ include "k8s-buddy.fullname" . }}-validating-webhook-configuration
+            # join "," on an empty list renders as "--allowed-image-
+            # registries=" -- an explicitly empty flag value, which
+            # PlantCustomValidator treats as the deliberate allow-all
+            # opt-out (see values.yaml's own webhook.allowedImageRegistries
+            # comment), never silently omitted.
+            - --allowed-image-registries={{ join "," .Values.webhook.allowedImageRegistries }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
@@ -43,6 +68,20 @@ spec:
             - name: probes
               containerPort: {{ .Values.probes.port }}
               protocol: TCP
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+          env:
+            # Downward API -- lets cmd/plant-operator/main.go compute the
+            # correct DNS SANs for its self-signed webhook serving
+            # certificate (docs/adr/0009-webhook-certificate-strategy.md)
+            # without this template and that Go code needing to agree on a
+            # namespace string independently. Always .Release.Namespace,
+            # exactly what k8s-buddy.namespace already resolves to.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
@@ -59,6 +98,18 @@ spec:
               port: probes
             periodSeconds: 5
             failureThreshold: 3
+          volumeMounts:
+            # Where cmd/plant-operator's certificate bootstrap writes
+            # tls.crt/tls.key at every startup -- see deploy/kustomize/
+            # operator/deployment.yaml's own comment on this same mount, and
+            # docs/adr/0009 for why an emptyDir (never a Secret/PVC) is
+            # correct here.
+            - name: webhook-certs
+              mountPath: {{ .Values.webhook.certDir }}
+              readOnly: false
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

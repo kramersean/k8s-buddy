@@ -1,0 +1,21 @@
+# Fronts the operator Deployment's "webhook" containerPort, matching
+# deploy/kustomize/operator/webhook-service.yaml -- see that file's own
+# comment for what dials it (the API server, per
+# templates/mutatingwebhookconfiguration.yaml and
+# templates/validatingwebhookconfiguration.yaml's own clientConfig.service).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-webhook
+  namespace: {{ include "k8s-buddy.namespace" . }}
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "k8s-buddy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP

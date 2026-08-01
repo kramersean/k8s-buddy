@@ -45,6 +45,29 @@ rules:
     verbs:
       - create
       - patch
+  # The caBundle-patching grant cmd/plant-operator's certificate bootstrap
+  # (docs/adr/0009-webhook-certificate-strategy.md) needs -- resourceNames
+  # here are RELEASE-SCOPED (matching templates/mutatingwebhookconfiguration
+  # .yaml and templates/validatingwebhookconfiguration.yaml's own
+  # metadata.name), unlike every other rule in this ClusterRole, which is a
+  # byte-for-byte mirror of config/rbac/role.yaml's fixed
+  # "plant-operator-*" names. hack/check-helm-rbac-drift.py's own
+  # normalization drops resourceNames from its equality check for exactly
+  # this reason, while still asserting a rule naming
+  # admissionregistration.k8s.io carries SOME non-empty resourceNames on
+  # both sides -- see that script's own comment.
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - mutatingwebhookconfigurations
+      - validatingwebhookconfigurations
+    resourceNames:
+      - {{ include "k8s-buddy.fullname" . }}-mutating-webhook-configuration
+      - {{ include "k8s-buddy.fullname" . }}-validating-webhook-configuration
+    verbs:
+      - get
+      - patch
+      - update
   - apiGroups:
       - apps
     resources:

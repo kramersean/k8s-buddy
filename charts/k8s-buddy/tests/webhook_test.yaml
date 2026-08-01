@@ -1,0 +1,177 @@
+suite: admission webhooks (MutatingWebhookConfiguration, ValidatingWebhookConfiguration, webhook Service, and the operator Deployment's webhook wiring)
+templates:
+  - mutatingwebhookconfiguration.yaml
+  - validatingwebhookconfiguration.yaml
+  - webhookservice.yaml
+  - deployment.yaml
+  - clusterrole.yaml
+release:
+  name: k8s-buddy
+  namespace: k8s-buddy-system
+tests:
+  - it: the MutatingWebhookConfiguration is release-scoped, not the kustomize path's fixed name
+    template: mutatingwebhookconfiguration.yaml
+    asserts:
+      - isKind:
+          of: MutatingWebhookConfiguration
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-mutating-webhook-configuration
+      - notEqual:
+          path: metadata.name
+          value: plant-operator-mutating-webhook-configuration
+      - equal:
+          path: webhooks[0].failurePolicy
+          value: Ignore
+      - equal:
+          path: webhooks[0].clientConfig.service.name
+          value: k8s-buddy-webhook
+      - equal:
+          path: webhooks[0].clientConfig.service.namespace
+          value: k8s-buddy-system
+      - equal:
+          path: webhooks[0].rules[0].operations
+          value: ["CREATE", "UPDATE"]
+      - notExists:
+          path: webhooks[0].clientConfig.caBundle
+
+  - it: a different release name produces a different MutatingWebhookConfiguration name (no collision between two installs)
+    release:
+      name: some-other-release
+      namespace: some-other-ns
+    template: mutatingwebhookconfiguration.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: some-other-release-k8s-buddy-mutating-webhook-configuration
+
+  - it: the ValidatingWebhookConfiguration is release-scoped and fails closed (Fail), unlike the mutating webhook
+    template: validatingwebhookconfiguration.yaml
+    asserts:
+      - isKind:
+          of: ValidatingWebhookConfiguration
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-validating-webhook-configuration
+      - equal:
+          path: webhooks[0].failurePolicy
+          value: Fail
+      - equal:
+          path: webhooks[0].clientConfig.service.name
+          value: k8s-buddy-webhook
+      - equal:
+          path: webhooks[0].rules[0].operations
+          value: ["CREATE", "UPDATE"]
+      - notExists:
+          path: webhooks[0].clientConfig.caBundle
+
+  - it: neither webhook configuration's rules list DELETE -- an unreachable webhook must never block `kubectl delete plant`
+    templates:
+      - mutatingwebhookconfiguration.yaml
+      - validatingwebhookconfiguration.yaml
+    asserts:
+      - notContains:
+          path: webhooks[0].rules[0].operations
+          content: DELETE
+
+  - it: the webhook Service is release-scoped and targets the webhook containerPort
+    template: webhookservice.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-webhook
+      - equal:
+          path: spec.ports[0].port
+          value: 443
+      - equal:
+          path: spec.ports[0].targetPort
+          value: webhook
+
+  - it: the Deployment exposes the webhook port, mounts the cert emptyDir, and sets POD_NAMESPACE
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[2].containerPort
+          value: 9443
+      - equal:
+          path: spec.template.spec.containers[0].ports[2].name
+          value: webhook
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /tmp/k8s-webhook-server/serving-certs
+      - equal:
+          path: spec.template.spec.volumes[0].emptyDir
+          value: {}
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: POD_NAMESPACE
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+
+  - it: the Deployment's args pass this release's own webhook object names, not the kustomize path's fixed defaults
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --webhook-service-name=k8s-buddy-webhook
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mutating-webhook-configuration-name=k8s-buddy-mutating-webhook-configuration
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --validating-webhook-configuration-name=k8s-buddy-validating-webhook-configuration
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --webhook-port=9443
+
+  - it: the default allowedImageRegistries renders as a non-empty, comma-joined flag
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --allowed-image-registries=ghcr.io/,docker.io/library/
+
+  - it: an empty allowedImageRegistries list renders the explicit allow-all opt-out, not an omitted flag
+    template: deployment.yaml
+    set:
+      webhook.allowedImageRegistries: []
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --allowed-image-registries=
+
+  - it: a custom certDir propagates identically to both the flag and the volumeMount, so they can never diverge
+    template: deployment.yaml
+    set:
+      webhook.certDir: /var/run/webhook-certs
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --webhook-cert-dir=/var/run/webhook-certs
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /var/run/webhook-certs
+
+  - it: the ClusterRole's admissionregistration rule is scoped to exactly this release's two webhook configuration names
+    template: clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["admissionregistration.k8s.io"]
+            resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+            resourceNames:
+              - k8s-buddy-mutating-webhook-configuration
+              - k8s-buddy-validating-webhook-configuration
+            verbs: ["get", "patch", "update"]
+
+  - it: rbac.create=false also omits the admissionregistration rule (the whole ClusterRole is gated)
+    template: clusterrole.yaml
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0

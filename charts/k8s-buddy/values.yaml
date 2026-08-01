@@ -117,6 +117,32 @@ probes:
   # --health-probe-bind-address port; serves /healthz and /readyz.
   port: 8082
 
+# Admission webhooks (see docs/adr/0009-webhook-certificate-strategy.md and
+# api/v1alpha1/plant_webhook.go). Always installed with this chart -- there
+# is no webhook.enabled toggle -- mirroring deploy/kustomize/operator, which
+# has none either: the defaulting webhook's failurePolicy: Ignore and the
+# CRD's own +kubebuilder:default markers mean an operator outage never loses
+# defaulting, and the validating webhook's failurePolicy: Fail deliberately
+# never covers the DELETE verb, so there is no scenario this chart's install
+# needs an opt-out for.
+webhook:
+  # --webhook-port; the containerPort the webhook Service targets.
+  port: 9443
+  # --webhook-cert-dir, and the emptyDir volume's mountPath -- both templates
+  # read this same value (see templates/deployment.yaml), so it can never
+  # drift between the flag and the mount.
+  certDir: /tmp/k8s-webhook-server/serving-certs
+  # spec.image registry allowlist the validating webhook enforces --
+  # --allowed-image-registries, comma-joined. Matches
+  # buddyv1alpha1.DefaultAllowedImageRegistries() exactly, so leaving this at
+  # its default behaves identically to omitting the flag entirely. An EMPTY
+  # list (`[]`) is the deliberate allow-all opt-out -- see
+  # PlantCustomValidator's own doc comment in api/v1alpha1/plant_webhook.go --
+  # never the default.
+  allowedImageRegistries:
+    - "ghcr.io/"
+    - "docker.io/library/"
+
 # The optional sample Plant, disabled by default so a plain `helm install`
 # deploys only the operator and its CRD -- a Custom Resource is data a
 # cluster-admin usually wants to choose deliberately, not something an
