@@ -1,49 +1,18 @@
-# Three NetworkPolicies, additive (Kubernetes NetworkPolicy rules OR
-# together for the pods they select -- there is no "deny wins" precedence):
+# Three additive NetworkPolicies (NetworkPolicy rules OR together for the
+# pods they select -- there is no "deny wins" precedence):
 #
-#   1. default-deny-all matches every pod in the namespace and declares
-#      both Ingress and Egress policy types with zero rules, which is the
-#      standard idiom for "nothing is allowed except what a later policy
-#      explicitly opens up."
-#   2. allow-dns-egress punches a hole through that default-deny for DNS
-#      only: kube-dns/CoreDNS in kube-system, on both UDP/53 and TCP/53
-#      (TCP because the Go DNS resolver can and does fall back to it for
-#      truncated responses). Without this, every outbound connection would
-#      fail at the name-resolution step, not just be blocked at the
-#      destination -- the classic default-deny-breaks-DNS trap.
-#   3. allow-http-ingress punches a hole for application traffic: port 8080
-#      on buddy-api pods is reachable from any source. This is
-#      deliberately NOT scoped to "pods within this namespace" --
-#      kubectl-verified against this cluster: NodePort traffic (the path
-#      hack/demo.sh and the host `curl localhost:30080` both use) arrives
-#      at the pod SNATed to the node's IP by kube-proxy, not the original
-#      client's, so a `from: podSelector` restriction silently drops it
-#      (TCP connects, then hangs forever -- no RST, just a black hole) even
-#      though it looks correct on paper. kind's kindnet CNI does enforce
-#      NetworkPolicy in this cluster (confirmed empirically -- see the
-#      Task 6 report for how the DNS and NodePort checks were done), so an
-#      unqualified `ingress: - ports: [...]` with no `from` is a real,
-#      necessary hole, not a no-op label.
-#
-#      Two tighter alternatives were considered and rejected:
-#        - `externalTrafficPolicy: Local` on the NodePort Service would
-#          preserve the client source IP (letting a `from` selector work),
-#          but it's actively wrong for this cluster: the 30080
-#          extraPortMapping in deploy/kind/kind-config.yaml lands on the
-#          control-plane node, which is NoSchedule-tainted and never runs
-#          a buddy-api pod, so `Local` would have no local endpoint to
-#          route to and would drop the traffic outright.
-#        - An `ipBlock` on the node/pod CIDR is tighter than "any source"
-#          but hardcodes a docker-assigned subnet -- this machine's kind
-#          network happens to be 172.20.0.0/16, but kind commonly assigns
-#          172.18.0.0/16 (or others) on a clean install. Hardcoding it
-#          would reintroduce the exact "works here, fails on a clean
-#          machine" failure mode the kind-load `:dev`-tag fix in this same
-#          task was written to eliminate.
-#      The rule below keeps the blast radius small on the axes that
-#      matter: it selects only buddy-api pods, opens only TCP/8080, and
-#      egress from those pods remains fully default-deny except for the
-#      DNS hole above.
+#   1. default-deny-all -- every pod in the namespace, both policy types,
+#      zero rules: nothing is allowed except what the policies below open.
+#   2. allow-dns-egress -- DNS to kube-system on UDP/53 and TCP/53 (TCP
+#      because Go's resolver falls back to it for truncated responses).
+#      Without it, default-deny breaks every outbound call at name
+#      resolution rather than at the destination.
+#   3. allow-http-ingress -- TCP/8080 to buddy-api pods, from any source.
+#      The missing `from:` selector is deliberate, not an oversight:
+#      kube-proxy SNATs NodePort traffic to the node IP, so a podSelector
+#      scope silently black-holes the demo's only traffic path. See
+#      docs/adr/0003 for the verification and the two tighter alternatives
+#      that were rejected.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

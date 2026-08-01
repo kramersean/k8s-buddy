@@ -57,22 +57,43 @@ The Makefile is the single entry point; use its targets rather than raw
 `go`/`docker`/`kubectl` invocations so local runs and CI never drift apart.
 
 ```bash
-make help           # list every available target
-make fmt vet lint    # static checks
-make test            # unit tests
-make build           # compile all cmd/ binaries
-make docker-build    # build the buddy-api image
-make kind-up         # bring up the local kind cluster (added in Task 5)
-make deploy          # apply the Kubernetes manifests (added in Task 6)
-make demo            # end-to-end: cluster up, build, load, deploy, narrate (added in Task 6)
+make help            # list every available target
+
+# Static checks and tests
+make fmt              # gofmt -w across the module
+make vet              # go vet ./...
+make lint             # golangci-lint, pinned version, installed into .tools/
+make test             # unit tests
+make test-race        # unit tests with the race detector (needs cgo; CI runs this on ubuntu-latest)
+make test-cover       # unit tests with a coverage profile, then a per-function report
+
+# Build
+make build            # compile every ./cmd/* binary into bin/
+make docker-build     # build the buddy-api image, tagged with the short git SHA and :dev
+
+# Local cluster
+make kind-up          # create the kind cluster (k8s-buddy) if it does not exist
+make kind-load        # load the built image (SHA tag and :dev) into the kind cluster
+make kind-down        # delete the kind cluster
+make deploy           # apply the manifests, pinning the image to the immutable git SHA
+make undeploy         # remove the manifests from the current context
+make status           # pods/services/PDB plus rollout status in the k8s-buddy namespace
+make logs             # tail logs from every buddy-api pod
+make demo             # end-to-end: kind-up -> build -> load -> deploy -> wait -> hack/demo.sh
+
+# Housekeeping
+make clean            # remove bin/, .build/, and coverage output
+make tools            # install/update pinned developer tooling into .tools/
+make tools-clean      # remove .tools/
+make rename-module    # rewrite the module path everywhere (MODULE=github.com/you/repo)
 ```
 
-`kind-up`, `deploy`, and `demo` do not exist yet as of this task — the
-Makefile currently only defines `help`, `fmt`, `vet`, `lint`, `test`,
-`test-cover`, `build`, `docker-build`, `clean`, `tools`, and `rename-module`.
-The three annotated targets above land in later tasks per
-`docs/superpowers/plans/2026-07-31-k8s-buddy-01-foundation.md`; running them
-now fails with "No rule to make target."
+`make deploy` never applies `deploy/kustomize/base` directly. The base pins a
+mutable `:dev` tag, and re-applying a mutable tag after a rebuild produces a
+byte-identical PodSpec, so no rollout happens and the cluster silently keeps
+running the old image. `deploy` renders a generated overlay under `.build/`
+(gitignored) that pins the immutable short git SHA instead. Use it rather than
+a raw `kubectl apply -k`.
 
 Prefer `kubectl apply --dry-run=client` and `helm template` before applying
 anything for real.

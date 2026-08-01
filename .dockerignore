@@ -1,5 +1,17 @@
+# The image build needs go.mod, go.sum, cmd/, and internal/ -- nothing
+# else. Everything below is excluded so it is never even uploaded to the
+# docker daemon as build context: a smaller context is a faster build, and
+# repository scaffolding that cannot affect the binary has no business
+# inside a build that produces a published artifact.
 .git
+.github/
+.claude/
+.superpowers/
 bin/
+.build/
 .tools/
+deploy/
+hack/
 docs/
 *.md
+LICENSE

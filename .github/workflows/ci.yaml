@@ -114,20 +114,13 @@ jobs:
           echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      # Required for the linux/arm64 leg below: build/Dockerfile.buddy-api's
-      # builder stage (golang:1.26-alpine) has no --platform=$BUILDPLATFORM
-      # and no GOARCH=$TARGETARCH, so `go mod download`/`go build` in the
-      # arm64 leg actually EXECUTES arm64 binaries under emulation.
-      # GitHub-hosted runners register no binfmt handlers by default --
-      # without this step the arm64 leg dies with "exec format error" and
-      # takes the whole job (and, transitively, anything gated behind it)
-      # down with it. Cross-compiling the Dockerfile with GOARCH=$TARGETARCH
-      # instead of emulating would be faster and more robust, but that file
-      # belongs to Task 5 and is out of scope here -- see the report's
-      # follow-up note.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
+      # No QEMU setup step, deliberately. build/Dockerfile.buddy-api pins
+      # its builder stage to --platform=$BUILDPLATFORM and compiles with
+      # GOOS=$TARGETOS/GOARCH=$TARGETARCH, so the linux/arm64 leg is
+      # cross-compiled on the amd64 runner rather than emulated, and the
+      # final stage is a COPY with no RUN. Nothing built for arm64 is ever
+      # executed during the build, so there is no binfmt handler for
+      # GitHub-hosted runners to be missing.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -288,9 +281,9 @@ jobs:
       - name: make docker-build
         run: make docker-build
 
-      # Loads BOTH the git-SHA tag and the :dev tag -- the Deployment
-      # manifest pins buddy-api:dev, so the SHA tag alone would leave the
-      # cluster unable to schedule any pods at all.
+      # Loads BOTH the git-SHA tag and the :dev tag. `make deploy` pins the
+      # SHA tag; :dev is what a bare `kubectl apply -k deploy/kustomize/base`
+      # would ask for, so loading both keeps either path schedulable.
       - name: make kind-load
         run: make kind-load
 

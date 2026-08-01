@@ -17,7 +17,13 @@ metadata:
 data:
   BUDDY_NAME: "fernie"
   BUDDY_SPECIES: "fern"
-  BUDDY_PORT: "8080"
+  # BUDDY_PORT is deliberately NOT set here. The port appears in five
+  # other places in this manifest set -- containerPort, the Service's
+  # targetPort, and the liveness, readiness, and startup probes -- none of
+  # which read this ConfigMap. Exposing it as a tunable would advertise a
+  # knob that, when turned, moves the server to a new port while every
+  # probe keeps polling 8080, and the deployment fails its way into
+  # CrashLoopBackOff. cmd/buddy-api still defaults it to 8080.
   BUDDY_LOG_LEVEL: "info"
   BUDDY_LATENCY_BUDGET: "150ms"
   BUDDY_WORK_ERROR_RATE: "0.05"
