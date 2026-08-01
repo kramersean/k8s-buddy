@@ -36,7 +36,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 5,
-      "description": "1 is correct for almost every install (leader election makes >1 safe, not useful). Bounded so a typo (e.g. 0 or 99) fails fast rather than producing a scaled-to-zero or absurdly over-scaled operator."
+      "description": "1 is correct for almost every install (leader election makes >1 safe for reconciliation, not useful). >1 is also safe for the admission webhook server -- which is NOT leader-election-gated, so every replica serves webhook traffic -- because each replica's own self-signed CA is APPENDED to (never overwrites) both webhook configurations' caBundle; see cmd/plant-operator/webhookcerts.go's mergeCABundle and docs/adr/0009. Bounded so a typo (e.g. 0 or 99) fails fast rather than producing a scaled-to-zero or absurdly over-scaled operator."
     },
 
     "resources": {
