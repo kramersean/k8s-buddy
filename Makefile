@@ -22,6 +22,15 @@ GOLANGCI_LINT_VERSION   := v2.12.2
 GOLANGCI_LINT           := $(TOOLS_DIR)/golangci-lint$(GOEXE)
 CONTROLLER_GEN_VERSION  := v0.21.0
 CONTROLLER_GEN          := $(TOOLS_DIR)/controller-gen$(GOEXE)
+# Pinned to the same release as sigs.k8s.io/controller-runtime in go.mod --
+# setup-envtest is published from controller-runtime's own tools/setup-envtest
+# submodule, tagged in lockstep with the runtime itself.
+SETUP_ENVTEST_VERSION   := v0.24.1
+SETUP_ENVTEST           := $(TOOLS_DIR)/setup-envtest$(GOEXE)
+# The Kubernetes control-plane version envtest boots. Must match
+# envtestK8sVersion in internal/controller/suite_test.go -- there is no
+# single source of truth shared between make and go test for this value.
+ENVTEST_K8S_VERSION     := 1.36.2
 
 # Where controller-gen's `object` (deepcopy) and `crd`/`rbac` generators look
 # for +kubebuilder markers, and where the CRD generator writes its output.
@@ -102,7 +111,13 @@ manifests: $(CONTROLLER_GEN) ## Regenerate the CRD manifests under config/crd/ba
 	$(CONTROLLER_GEN) crd paths="$(API_DIRS)" output:crd:artifacts:config=$(CRD_DIR)
 
 .PHONY: test
-test: ## Run unit tests (no-op on an empty module)
+# The envtest controller suite (internal/controller/{suite,plant_controller,
+# counting_client}_test.go) is gated behind the "envtest" build tag and does
+# NOT run under this target: it boots a real kube-apiserver + etcd, which
+# costs a real binary download and real wall-clock time neither `make test`
+# nor CI's `make test-race` / `make test-cover` should have to pay by
+# default. Run it explicitly via `make test-envtest`.
+test: ## Run unit tests (excludes the envtest controller suite -- see test-envtest)
 	@pkgs="$$(go list ./... 2>/dev/null)"; \
 	if [ -z "$$pkgs" ]; then \
 		echo "test: no Go packages yet, skipping"; \
@@ -129,6 +144,28 @@ test-cover: ## Run unit tests with a coverage profile (no-op on an empty module)
 		go test ./... -coverprofile=$(COVER_FILE) -covermode=atomic; \
 		go tool cover -func=$(COVER_FILE); \
 	fi
+
+$(SETUP_ENVTEST):
+	@mkdir -p $(TOOLS_DIR)
+	@echo "Installing setup-envtest $(SETUP_ENVTEST_VERSION) into $(TOOLS_DIR)..."
+	@GOBIN="$$(pwd)/$(TOOLS_DIR)" go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
+
+.PHONY: envtest
+envtest: $(SETUP_ENVTEST) ## Download/locate the envtest control-plane binaries (Kubernetes $(ENVTEST_K8S_VERSION)) via the pinned setup-envtest, and print KUBEBUILDER_ASSETS
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path
+
+.PHONY: test-envtest
+# Resolves KUBEBUILDER_ASSETS itself (downloading the control-plane binaries
+# on first run, reusing setup-envtest's own cache thereafter) rather than
+# requiring `make envtest` as a separate step first -- `make test-envtest`
+# alone is always sufficient. The suite itself (see suite_test.go) also
+# resolves KUBEBUILDER_ASSETS on its own if it isn't already set when
+# invoked some other way (e.g. `go test -tags envtest ./internal/controller/...`
+# directly), and fails loudly rather than skipping if that resolution fails.
+test-envtest: $(SETUP_ENVTEST) ## Run the envtest controller suite (boots a real kube-apiserver + etcd; internal/controller only)
+	@assets="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)"; \
+	echo "test-envtest: KUBEBUILDER_ASSETS=$$assets"; \
+	KUBEBUILDER_ASSETS="$$assets" go test -tags envtest ./internal/controller/... -v
 
 .PHONY: build
 build: ## Build every ./cmd/* binary into bin/ (no-op until cmd/ exists)
@@ -234,7 +271,7 @@ clean: ## Remove build artifacts and coverage output (leaves .tools/ intact; see
 	@rm -rf $(BIN_DIR) $(BUILD_DIR) $(COVER_FILE)
 
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(CONTROLLER_GEN) ## Install/update pinned local developer tooling into .tools/
+tools: $(GOLANGCI_LINT) $(CONTROLLER_GEN) $(SETUP_ENVTEST) ## Install/update pinned local developer tooling into .tools/
 
 .PHONY: tools-clean
 tools-clean: ## Remove downloaded local tooling
