@@ -1,0 +1,36 @@
+# Grants kube-prometheus-stack's own Prometheus ServiceAccount the
+# permission it needs to successfully scrape plant-operator's gated
+# :8081/metrics endpoint (see cmd/plant-operator/main.go's
+# filters.WithAuthenticationAndAuthorization wiring and
+# config/rbac/metrics_reader_role.yaml, which defines WHAT this grant is).
+#
+# The ServiceAccount name below ("kube-prometheus-stack-prometheus") is
+# derived from `fullnameOverride: kube-prometheus-stack` in
+# values-kube-prometheus-stack.yaml -- the two files must agree, and are
+# expected to be applied together (see the Makefile's
+# `observability-install` target, which installs the chart with that
+# `fullnameOverride` and then applies this file via `make observability-install`'s
+# own kubectl apply -k step). Renaming the Helm release without updating this
+# subject leaves Prometheus authenticated (it has a valid, in-cluster
+# ServiceAccount token) but not authorized -- scrapes would come back 403,
+# which shows up as `up{job="plant-operator"} == 0` with no more specific
+# error surfaced anywhere kubectl can show you, so if you rename the
+# release, update this file's subject name in the same change.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-prometheus-stack-metrics-reader-rolebinding
+  labels:
+    app.kubernetes.io/name: k8s-buddy-observability
+    app.kubernetes.io/instance: k8s-buddy-observability
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: plant-operator-metrics-reader-role
+subjects:
+  - kind: ServiceAccount
+    name: kube-prometheus-stack-prometheus
+    namespace: k8s-buddy-observability

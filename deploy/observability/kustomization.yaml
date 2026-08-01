@@ -1,0 +1,40 @@
+# The Kustomize half of the observability stack: the namespace, the
+# cross-cutting RBAC binding kube-prometheus-stack's own Helm chart has no
+# way to express (it doesn't know this project's plant-operator ClusterRole
+# exists), and the two static ServiceMonitors for plant-operator and
+# chaos-buddy (each a cluster/namespace singleton, not owned by any Plant,
+# so unlike the operator's own per-Plant ServiceMonitor there is no
+# reconciler to generate these). Prometheus, Alertmanager, Grafana, and Loki
+# themselves are installed by Helm (`make observability-install`), not by
+# this kustomization -- Helm and Kustomize are complementary here, the same
+# way they already are for the CRD (Kustomize-applied) versus the sample
+# Plants (kubectl-applied) elsewhere in this repo.
+#
+# ORDER MATTERS, in both directions. namespace.yaml has to exist BEFORE the
+# Helm charts install (Helm does not create namespaces with the PSA labels
+# this one needs), while prometheus-rbac.yaml (references the
+# plant-operator-metrics-reader-role ClusterRole) and the two
+# servicemonitor-*.yaml files (reference the ServiceMonitor CRD) need
+# deploy/kustomize/operator and the kube-prometheus-stack/loki Helm charts to
+# already be applied. `make observability-install` resolves this by applying
+# namespace.yaml alone first, installing the Helm releases into it, and only
+# THEN applying this whole kustomization (namespace.yaml again, idempotently,
+# plus the two CRD/ClusterRole-dependent files) -- see that target's own
+# comment in the Makefile for the exact sequence. Applying this kustomization
+# standalone on a cluster missing either prerequisite fails loudly (a "no
+# matches for kind" or "ClusterRole not found" error), not silently.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - prometheus-rbac.yaml
+  - servicemonitor-operator.yaml
+  - servicemonitor-chaos.yaml
+  - ../../observability/dashboards
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

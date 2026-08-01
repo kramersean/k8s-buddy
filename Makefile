@@ -93,6 +93,22 @@ PLANT_LABEL     := buddy.k8s-buddy.io/plant
 CHAOS_BASE      := deploy/kustomize/chaos
 CHAOS_BUILD_DIR := $(BUILD_DIR)/chaos
 
+# The observability stack: kube-prometheus-stack (Prometheus, Alertmanager,
+# Grafana, kube-state-metrics, node-exporter, the Prometheus Operator) and
+# Loki+promtail (logs), all Helm-installed into one namespace, plus the
+# committed dashboard and PrometheusRules applied as plain manifests. Chart
+# versions are PINNED here, exactly -- `--version latest` (or omitting
+# --version) is not reproducible, and a chart upgrade landing silently under
+# a moving tag is exactly the kind of drift this project's pinned-tool
+# pattern (GOLANGCI_LINT_VERSION, CONTROLLER_GEN_VERSION, ...) already
+# guards against everywhere else.
+OBSERVABILITY_NAMESPACE       := k8s-buddy-observability
+OBSERVABILITY_VALUES_DIR      := deploy/observability
+OBSERVABILITY_BUILD_DIR       := $(BUILD_DIR)/observability
+KUBE_PROMETHEUS_STACK_VERSION := 88.0.1
+LOKI_CHART_VERSION            := 7.2.0
+PROMTAIL_CHART_VERSION        := 6.17.1
+
 # The tracked kustomization the `deploy` target renders through a generated,
 # throwaway overlay so it can pin an immutable image tag without ever
 # dirtying a committed file.
@@ -421,6 +437,129 @@ deploy-chaos: docker-build-chaos kind-load-chaos ## Apply chaos-buddy's namespac
 .PHONY: undeploy-chaos
 undeploy-chaos: ## Remove chaos-buddy's RBAC, ConfigMaps, and Deployment (deploy/kustomize/chaos) from the current kubectl context (leaves the k8s-buddy-plants namespace and any Plants in it alone)
 	kubectl delete -k deploy/kustomize/chaos --ignore-not-found
+
+# observability-install's ordering is load-bearing, not incidental:
+#
+#   1. The namespace, applied ALONE and first -- Helm does not create
+#      namespaces with the PSA labels deploy/observability/namespace.yaml
+#      carries, so it has to exist (with those labels) before either Helm
+#      release lands a single pod in it.
+#   2. kube-prometheus-stack -- brings the ServiceMonitor/PrometheusRule
+#      CRDs and the Prometheus Operator that watches for them. Installed
+#      before Loki/promtail only because it is also the one that matters for
+#      steps 4-5 below; Loki has no ordering dependency on it.
+#   3. Loki, then promtail -- promtail's --set below hardcodes the "loki"
+#      release's own Service DNS name (see values-loki.yaml's own comment on
+#      why gateway.enabled: false means Grafana/promtail talk to Loki's
+#      singleBinary Service directly), so Loki has to already exist as a
+#      release name promtail's config can point at; in practice `helm
+#      upgrade --install` doesn't require the Service to already be UP, only
+#      that this Makefile's own hardcoded URL agrees with what step 3
+#      creates.
+#   4. `kubectl apply -k deploy/observability` -- re-applies the namespace
+#      (idempotent) and applies prometheus-rbac.yaml (references the
+#      plant-operator-metrics-reader-role ClusterRole, which requires
+#      deploy/kustomize/operator to already be deployed -- run `make
+#      deploy-operator` first on a cluster where it isn't) and the two
+#      static ServiceMonitors (reference the CRD step 2 just installed) and
+#      the dashboard ConfigMap.
+#   5. The PrometheusRules -- observability/rules/*.yaml are committed in
+#      PLAIN Prometheus rule-file format (top-level `groups:`, exactly what
+#      `promtool check rules` validates directly) rather than as
+#      Kubernetes PrometheusRule custom resources, so the single committed
+#      file is both the promtool-checkable source AND (via the thin
+#      generated wrapper below) the cluster object -- never two documents
+#      that could drift. The wrapper is regenerated into
+#      $(OBSERVABILITY_BUILD_DIR) on every invocation (gitignored, same
+#      pattern as $(DEPLOY_BUILD_DIR)/$(OPERATOR_BUILD_DIR) above) by
+#      indenting the rule file's own `groups:` block under `spec:`.
+.PHONY: observability-install
+observability-install: ## Install kube-prometheus-stack + Loki + promtail (pinned chart versions) plus the dashboard, PrometheusRules, and RBAC (run after deploy-operator and deploy-chaos)
+	@echo "observability-install: creating namespace $(OBSERVABILITY_NAMESPACE) (PSA baseline -- see deploy/observability/namespace.yaml for why)"
+	kubectl apply -f $(OBSERVABILITY_VALUES_DIR)/namespace.yaml
+	@echo "observability-install: adding/updating the prometheus-community and grafana chart repos"
+	@helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+	@helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
+	helm repo update prometheus-community grafana
+	@echo "observability-install: installing kube-prometheus-stack $(KUBE_PROMETHEUS_STACK_VERSION)"
+	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--version $(KUBE_PROMETHEUS_STACK_VERSION) \
+		--namespace $(OBSERVABILITY_NAMESPACE) \
+		-f $(OBSERVABILITY_VALUES_DIR)/values-kube-prometheus-stack.yaml \
+		--wait --timeout 5m
+	@echo "observability-install: installing loki $(LOKI_CHART_VERSION)"
+	helm upgrade --install loki grafana/loki \
+		--version $(LOKI_CHART_VERSION) \
+		--namespace $(OBSERVABILITY_NAMESPACE) \
+		-f $(OBSERVABILITY_VALUES_DIR)/values-loki.yaml \
+		--wait --timeout 5m
+	@echo "observability-install: installing promtail $(PROMTAIL_CHART_VERSION), pointed at the loki release just installed"
+	helm upgrade --install promtail grafana/promtail \
+		--version $(PROMTAIL_CHART_VERSION) \
+		--namespace $(OBSERVABILITY_NAMESPACE) \
+		--set "config.clients[0].url=http://loki.$(OBSERVABILITY_NAMESPACE).svc.cluster.local:3100/loki/api/v1/push" \
+		--wait --timeout 5m
+	@echo "observability-install: applying namespace/RBAC/dashboard/ServiceMonitors (deploy/observability)"
+	kubectl apply -k $(OBSERVABILITY_VALUES_DIR)
+	@echo "observability-install: generating and applying PrometheusRules from observability/rules/*.yaml"
+	@mkdir -p $(OBSERVABILITY_BUILD_DIR)
+	@{ \
+		echo "# Generated by \`make observability-install\` from observability/rules/slo.yaml. Do not edit; do not commit."; \
+		echo "apiVersion: monitoring.coreos.com/v1"; \
+		echo "kind: PrometheusRule"; \
+		echo "metadata:"; \
+		echo "  name: buddy-api-slo"; \
+		echo "  namespace: $(OBSERVABILITY_NAMESPACE)"; \
+		echo "  labels:"; \
+		echo "    app.kubernetes.io/name: k8s-buddy-observability"; \
+		echo "    app.kubernetes.io/instance: k8s-buddy-observability"; \
+		echo "    app.kubernetes.io/component: observability"; \
+		echo "    app.kubernetes.io/part-of: k8s-buddy"; \
+		echo "    app.kubernetes.io/managed-by: kustomize"; \
+		echo "spec:"; \
+		sed 's/^/  /' observability/rules/slo.yaml; \
+	} > $(OBSERVABILITY_BUILD_DIR)/prometheusrule-slo.yaml
+	@{ \
+		echo "# Generated by \`make observability-install\` from observability/rules/operational.yaml. Do not edit; do not commit."; \
+		echo "apiVersion: monitoring.coreos.com/v1"; \
+		echo "kind: PrometheusRule"; \
+		echo "metadata:"; \
+		echo "  name: k8s-buddy-operational"; \
+		echo "  namespace: $(OBSERVABILITY_NAMESPACE)"; \
+		echo "  labels:"; \
+		echo "    app.kubernetes.io/name: k8s-buddy-observability"; \
+		echo "    app.kubernetes.io/instance: k8s-buddy-observability"; \
+		echo "    app.kubernetes.io/component: observability"; \
+		echo "    app.kubernetes.io/part-of: k8s-buddy"; \
+		echo "    app.kubernetes.io/managed-by: kustomize"; \
+		echo "spec:"; \
+		sed 's/^/  /' observability/rules/operational.yaml; \
+	} > $(OBSERVABILITY_BUILD_DIR)/prometheusrule-operational.yaml
+	kubectl apply -f $(OBSERVABILITY_BUILD_DIR)/prometheusrule-slo.yaml -f $(OBSERVABILITY_BUILD_DIR)/prometheusrule-operational.yaml
+	@echo
+	@echo "observability-install: done. Grafana: http://localhost:30300 (see \`make grafana-port-forward\` for the admin password)."
+
+.PHONY: observability-uninstall
+observability-uninstall: ## Remove the observability stack: the three Helm releases, deploy/observability, the generated PrometheusRules, and the namespace itself (leaves kube-prometheus-stack's CRDs installed -- Helm's own convention, since another release could still reference them)
+	-helm uninstall promtail --namespace $(OBSERVABILITY_NAMESPACE)
+	-helm uninstall loki --namespace $(OBSERVABILITY_NAMESPACE)
+	-helm uninstall kube-prometheus-stack --namespace $(OBSERVABILITY_NAMESPACE)
+	kubectl delete -f $(OBSERVABILITY_BUILD_DIR)/prometheusrule-slo.yaml -f $(OBSERVABILITY_BUILD_DIR)/prometheusrule-operational.yaml --ignore-not-found 2>/dev/null || true
+	kubectl delete -k $(OBSERVABILITY_VALUES_DIR) --ignore-not-found
+	kubectl delete namespace $(OBSERVABILITY_NAMESPACE) --ignore-not-found
+
+.PHONY: grafana-port-forward
+grafana-port-forward: ## Print the generated Grafana admin password, then port-forward Grafana to localhost:3000 (it is also already reachable at localhost:30300 via NodePort, no port-forward required)
+	@echo "Grafana is reachable directly at http://localhost:30300 (NodePort -- see deploy/kind/kind-config.yaml's extraPortMappings)."
+	@echo
+	@echo "Admin username: admin"
+	@echo -n "Admin password: "
+	@kubectl -n $(OBSERVABILITY_NAMESPACE) get secret kube-prometheus-stack-grafana \
+		-o jsonpath='{.data.admin-password}' | base64 -d
+	@echo
+	@echo
+	@echo "Port-forwarding to http://localhost:3000 as well (Ctrl-C to stop)..."
+	kubectl -n $(OBSERVABILITY_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana 3000:80
 
 .PHONY: status
 status: ## Show buddy-api pods/services/PDB and rollout status in the k8s-buddy namespace

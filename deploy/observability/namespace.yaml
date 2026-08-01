@@ -1,0 +1,71 @@
+# Namespace k8s-buddy-observability: Prometheus, Alertmanager, Grafana, Loki,
+# and the Prometheus Operator that manages the first two.
+#
+# EVERY OTHER namespace this project creates enforces Pod Security
+# Admission's `restricted` profile (deploy/kustomize/base/namespace.yaml,
+# deploy/kustomize/operator/namespace.yaml, deploy/kustomize/plants/
+# namespace.yaml). This one deliberately does NOT, and that is a considered
+# exception, not a silent downgrade -- read this comment before assuming it's
+# an oversight.
+#
+# Two DaemonSets this namespace runs need the host's own filesystem and
+# network/PID namespace, by design, not by a configuration choice that could
+# be tightened away:
+#
+#   - promtail (grafana/promtail) is a DaemonSet whose entire job is reading
+#     node-local container log files -- /var/log/pods and the container
+#     runtime's own log directory on each node. There is no way to read a
+#     node's own files without a hostPath mount to that node's filesystem.
+#     Upstream's own chart defaults it to runAsUser: 0 (root), because those
+#     log files are root-owned on the host. The alternative log collectors
+#     (Grafana Alloy, Fluent Bit, Filebeat, ...) all have the identical
+#     requirement -- this is inherent to being a node-level log shipper, not
+#     a promtail-specific gap.
+#   - prometheus-node-exporter (the kube-prometheus-stack subchart that
+#     supplies node CPU/memory/disk metrics) is a DaemonSet that sets
+#     hostNetwork: true, hostPID: true, and mounts /proc, /sys, and / from
+#     the host -- again inherent to reading host-level metrics, not
+#     something a tighter securityContext could substitute for.
+#
+# The first attempt at this ADR used `baseline`, on the (incorrect)
+# assumption that only `restricted` blocks hostPath/hostNetwork/hostPID.
+# It does not survive contact with the actual PSA spec, and it did not
+# survive contact with the live cluster either: `helm upgrade --install`
+# against a `baseline`-enforcing namespace produced
+# `Warning: would violate PodSecurity "baseline:latest": host namespaces
+# (hostNetwork=true, hostPID=true), hostPath volumes (volumes "proc", "sys",
+# "root")`, and prometheus-node-exporter's DaemonSet sat at 0/3 Ready,
+# rejected at admission, until this was corrected. `baseline` (per the
+# upstream Pod Security Standards) forbids exactly the same three things
+# `restricted` does on this axis -- host namespaces and hostPath volumes are
+# disallowed starting at `baseline`, not just at `restricted`. `privileged`
+# is therefore the ONLY PSA level under which node-exporter and promtail's
+# own upstream chart defaults are admitted at all; there is no middle tier
+# that fits.
+#
+# Prometheus, Alertmanager, Grafana, and Loki's own pods need none of this --
+# each of those charts' own defaults already run non-root, with all
+# capabilities dropped, allowPrivilegeEscalation: false, and (in this
+# project's committed values files) an explicit RuntimeDefault
+# seccompProfile -- the exact posture `restricted` would enforce, opted into
+# per-container regardless of what the namespace ceiling permits. Only the
+# two DaemonSets above actually use the headroom `privileged` grants over
+# `restricted`; `kubectl get pods -n k8s-buddy-observability -o
+# jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.hostNetwork}{"\t"}
+# {.spec.hostPID}{"\n"}{end}'` shows exactly which two pods actually use the
+# host namespaces this ceiling permits -- everything else in the namespace
+# runs exactly as hardened as it would under `restricted`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-buddy-observability
+  labels:
+    app.kubernetes.io/name: k8s-buddy-observability
+    app.kubernetes.io/instance: k8s-buddy-observability
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

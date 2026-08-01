@@ -1,0 +1,180 @@
+# Values for the `grafana/loki` chart, pinned to 7.2.0 in the Makefile
+# (`make observability-install`).
+#
+# `loki-stack` (the chart the task brief names first) is Grafana's own
+# predecessor to this combination and is effectively unmaintained: its most
+# recent release (2.10.3) still ships Loki app version 2.9.3, several major
+# Loki releases behind grafana/loki's own 3.6.11, and its own chart
+# repository README now points readers at grafana/loki + grafana/promtail
+# instead. This project uses the current, actively maintained pair: the
+# `loki` chart below (Grafana Loki itself) plus `values-promtail.yaml`... no
+# such file exists -- promtail is installed with its own `helm install`
+# call in the Makefile using upstream's own default chart, since it needs
+# only a handful of overrides, all passed as `--set` flags there (see
+# `observability-install`) rather than a whole second committed values file
+# for three settings.
+deploymentMode: SingleBinary
+
+loki:
+  # Single-tenant: this is a demo cluster with one tenant (this project),
+  # not a shared multi-tenant Loki install, so requiring every write/read to
+  # carry an X-Scope-OrgID header buys nothing here and would only be one
+  # more thing promtail and Grafana's datasource both have to agree on.
+  auth_enabled: false
+  # useTestSchema is the chart's own documented escape hatch for exactly
+  # this situation ("a real Loki install requires a proper schemaConfig...
+  # however for testing or playing around you can enable useTestSchema") --
+  # it derives a valid schemaConfig automatically from loki.storage.type
+  # below, which is simpler and less error-prone than hand-writing one for a
+  # demo that doesn't need to reason about schema migrations.
+  useTestSchema: true
+  storage:
+    type: filesystem
+  commonConfig:
+    # 1, not the chart's own default of 3: SingleBinary mode runs exactly
+    # one Loki process, and a replication factor greater than the number of
+    # ingesters it's replicated across is not just wasted, it can make
+    # writes fail outright once the schema requires quorum from replicas
+    # that don't exist.
+    replication_factor: 1
+  limits_config:
+    # Short retention, matching Prometheus's own 6h in
+    # values-kube-prometheus-stack.yaml -- this is a demo stack sized for a
+    # single chaos-run session, not a production log retention policy, and
+    # the data lives in an emptyDir that a pod restart erases anyway (see
+    # singleBinary.persistence.enabled: false below).
+    retention_period: 24h
+    reject_old_samples: true
+    reject_old_samples_max_age: 24h
+  # The chart's own defaults (fsGroup/runAsUser 10001, all capabilities
+  # dropped, no privilege escalation, read-only root filesystem) are already
+  # close to Pod Security Admission's `restricted` profile; the one thing
+  # they omit is seccompProfile, which restricted checks for explicitly.
+  # Adding it here means Loki's own pod satisfies `restricted` even though
+  # deploy/observability/namespace.yaml's ceiling is `baseline` (needed for
+  # promtail and node-exporter, not for Loki) -- opting into the stricter
+  # posture per-container wherever a chart's own defaults allow it, exactly
+  # like every other component in this stack.
+  podSecurityContext:
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 10001
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    allowPrivilegeEscalation: false
+    seccompProfile:
+      type: RuntimeDefault
+
+# The sidecar that watches for ConfigMaps/Secrets labelled `loki_rule` and
+# loads them as Loki ruler rules is unrelated to this project's own alerting
+# (observability/rules/*.yaml are Prometheus PrometheusRules, loaded by
+# kube-prometheus-stack's Prometheus Operator, not by Loki's ruler) --
+# disabling it removes an extra container and its own ClusterRole/
+# ClusterRoleBinding for something this project never uses.
+sidecar:
+  rules:
+    enabled: false
+
+singleBinary:
+  replicas: 1
+  # No PersistentVolumeClaim -- matching this stack's "no PVs" sizing across
+  # every component (kind ships only the `standard` local-path provisioner,
+  # and a demo has no business asking it for durable chunks storage).
+  #
+  # persistence.enabled: false alone is NOT sufficient, and finding that out
+  # cost one crash-loop on the live cluster: with no PVC AND no explicit
+  # replacement volume, /var/loki (loki.commonConfig.path_prefix) is part of
+  # the container's own read-only root filesystem
+  # (loki.containerSecurityContext.readOnlyRootFilesystem: true), and Loki
+  # fails outright at startup ("mkdir /var/loki: read-only file system",
+  # surfaced as "error initialising module: ruler-storage") because it has
+  # nowhere writable to create its working directories. extraVolumes/
+  # extraVolumeMounts below give it an emptyDir explicitly -- ephemeral,
+  # consistent with disabling persistence, but writable.
+  persistence:
+    enabled: false
+  extraVolumes:
+    - name: data
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: data
+      mountPath: /var/loki
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+# This project runs Loki as a single binary (see deploymentMode above), not
+# the chart's own default SimpleScalable (write/read/backend) topology --
+# SimpleScalable REQUIRES object storage (S3-compatible), which this local
+# demo has no business standing up a MinIO deployment to provide. Zeroing
+# out every SimpleScalable and Distributed-mode component's replica count
+# keeps `helm template`/`helm install` from creating Deployments this chart
+# would otherwise render regardless of deploymentMode for some of its
+# optional pieces.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# nginx in front of read/write/backend, meaningless for a SingleBinary
+# install with no split read/write path to route between -- Grafana and
+# promtail talk to the singleBinary Service ("loki", port 3100) directly.
+gateway:
+  enabled: false
+
+# Both would deploy their own memcached StatefulSets. At this data volume
+# (one demo session's worth of chaos-run logs) the cache buys nothing worth
+# the extra two pods.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# The chart's own Helm test hook and its canary DaemonSet (which
+# continuously writes and queries synthetic log lines to self-test the
+# install) are diagnostic tooling for a production Loki, not something this
+# demo's dashboard or alerting depends on.
+test:
+  enabled: false
+lokiCanary:
+  enabled: false
+
+# Loki's own object-storage backend for SimpleScalable/Distributed mode.
+# Irrelevant in SingleBinary + filesystem-storage mode (see loki.storage.type
+# above); explicit false rather than relying on the chart's own default so a
+# future chart upgrade that changes that default can't silently stand up a
+# MinIO deployment this project never asked for.
+minio:
+  enabled: false
+
+monitoring:
+  # Ships its own default Grafana dashboards for monitoring Loki itself.
+  # This project ships exactly one dashboard
+  # (observability/dashboards/k8s-buddy.json), provisioned the same
+  # sidecar-ConfigMap way -- Loki's own operational dashboards are a
+  # reasonable thing to add later but are not part of what this task asks
+  # the one screen to show.
+  dashboards:
+    enabled: false
+  rules:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+  # DEPRECATED upstream (relies on the deprecated Grafana Agent Operator);
+  # explicitly false rather than left to the chart's own default for the
+  # same "don't silently pull in extra CRDs and operators" reasoning as
+  # minio.enabled above.
+  selfMonitoring:
+    enabled: false

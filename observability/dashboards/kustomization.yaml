@@ -1,0 +1,51 @@
+# Wraps k8s-buddy.json in a ConfigMap carrying the `grafana_dashboard: "1"`
+# label the kube-prometheus-stack Grafana subchart's sidecar watches for
+# (grafana.sidecar.dashboards, enabled by that chart's own default, with
+# searchNamespace: ALL -- see values-kube-prometheus-stack.yaml's own
+# comments). The sidecar polls the Kubernetes API for ConfigMaps carrying
+# that label, mounts each one's contents into Grafana's provisioning
+# directory, and Grafana picks it up with NO manual import step -- this
+# kustomization plus `kubectl apply -k` (via deploy/observability's own
+# kustomization, which pulls this directory in as a base) is the entire
+# mechanism.
+#
+# `configMapGenerator` reads k8s-buddy.json directly at `kubectl kustomize`/
+# `apply -k` time, rather than a hand-maintained ConfigMap YAML wrapping a
+# copy of the JSON -- the single committed dashboard file is therefore the
+# only place its content ever needs to be edited; there is no second copy to
+# fall out of sync.
+#
+# This directory has its own kustomization.yaml (rather than being listed as
+# a bare resource file from deploy/observability/kustomization.yaml)
+# because kustomize's default load restriction forbids a kustomization from
+# referencing an individual file outside its own directory tree -- the same
+# reason config/rbac/kustomization.yaml exists as a wrapper kustomize can
+# reference as a base regardless of location. See that file's own comment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k8s-buddy-observability
+
+configMapGenerator:
+  - name: k8s-buddy-dashboard
+    files:
+      - k8s-buddy.json
+    options:
+      # Stable name, no content-hash suffix: this ConfigMap is discovered by
+      # Grafana's sidecar via a label-selected watch, not mounted as a
+      # volume a Pod needs restarting to pick up a new hash-suffixed name
+      # for. A stable name also keeps `kubectl apply -k` idempotent instead
+      # of leaving old hash-suffixed ConfigMaps behind on every dashboard
+      # edit.
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: k8s-buddy-observability
+      app.kubernetes.io/instance: k8s-buddy-observability
+      app.kubernetes.io/component: observability
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
