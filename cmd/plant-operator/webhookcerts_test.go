@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -88,6 +89,31 @@ func selfSignedTestCA(t *testing.T, commonName string, notAfter time.Time) []byt
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
+// selfSignedTestCAAtNotBefore is selfSignedTestCA's counterpart for tests
+// that need to control NotBefore precisely (to exercise mergeCABundle's
+// newest-first ordering) rather than deriving it from NotAfter. NotAfter is
+// always notBefore+10y, matching webhookCertificateValidity in spirit --
+// only NotBefore varies between calls in the tests that use this.
+func selfSignedTestCAAtNotBefore(t *testing.T, commonName string, notBefore time.Time) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             notBefore,
+		NotAfter:              notBefore.Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
 func countCertsInBundle(t *testing.T, bundle []byte) int {
 	t.Helper()
 	n := 0
@@ -148,6 +174,73 @@ func TestMergeCABundle_SkipsGarbageWithoutFailing(t *testing.T) {
 	merged := mergeCABundle(garbage, newCA)
 
 	require.Equal(t, 1, countCertsInBundle(t, merged))
+}
+
+// --- maxRetainedCAs cap --------------------------------------------------
+//
+// Every restart mints a brand-new, random CA (see maxRetainedCAs' own
+// comment) -- dedup-by-byte-equality alone does not bound growth across
+// restarts, only across retries of the SAME generation. These tests prove
+// the cap that does.
+
+// TestMergeCABundle_CapsAtMaxRetainedCAs simulates 5 sequential process
+// restarts, each merging its own brand-new CA into the accumulating
+// bundle -- the exact scenario an operator restarted daily, with 10-year
+// certificate validity, would otherwise hit unbounded.
+func TestMergeCABundle_CapsAtMaxRetainedCAs(t *testing.T) {
+	now := time.Now()
+	var bundle []byte
+	for i := range 5 {
+		ca := selfSignedTestCAAtNotBefore(t, fmt.Sprintf("pod-restart-%d", i), now.Add(time.Duration(i)*time.Hour))
+		bundle = mergeCABundle(bundle, ca)
+	}
+
+	require.Equal(t, maxRetainedCAs, countCertsInBundle(t, bundle),
+		"5 sequential restarts must not grow the caBundle past maxRetainedCAs")
+}
+
+// TestMergeCABundle_RetainsNewestByNotBefore proves WHICH entries survive
+// the cap: the maxRetainedCAs most recently-issued, never an arbitrary or
+// oldest-first subset -- losing the newest CA (the one actually in use by
+// whatever Pod is currently running) would be the one truly unacceptable
+// outcome of capping at all.
+func TestMergeCABundle_RetainsNewestByNotBefore(t *testing.T) {
+	now := time.Now()
+	var cas [][]byte
+	var bundle []byte
+	for i := range 5 {
+		ca := selfSignedTestCAAtNotBefore(t, fmt.Sprintf("pod-restart-%d", i), now.Add(time.Duration(i)*time.Hour))
+		cas = append(cas, ca)
+		bundle = mergeCABundle(bundle, ca)
+	}
+
+	oldestDropped := len(cas) - maxRetainedCAs
+	for i, ca := range cas {
+		if i >= oldestDropped {
+			require.Contains(t, string(bundle), string(ca[:64]), "newest CA #%d (pod-restart-%d) must be retained", i, i)
+		} else {
+			require.NotContains(t, string(bundle), string(ca[:64]), "oldest CA #%d (pod-restart-%d) must have been dropped by the cap", i, i)
+		}
+	}
+}
+
+// TestMergeCABundle_PrunesExpiredEntriesEvenUnderTheCap proves pruning an
+// expired entry does not depend on the cap having been reached -- an
+// expired CA must never survive merely because there was still "room"
+// under maxRetainedCAs to keep it.
+func TestMergeCABundle_PrunesExpiredEntriesEvenUnderTheCap(t *testing.T) {
+	now := time.Now()
+	var bundle []byte
+	bundle = mergeCABundle(bundle, selfSignedTestCAAtNotBefore(t, "pod-0", now))
+	bundle = mergeCABundle(bundle, selfSignedTestCAAtNotBefore(t, "pod-1", now.Add(time.Hour)))
+	require.Equal(t, 2, countCertsInBundle(t, bundle), "sanity: well under maxRetainedCAs so far")
+
+	expiredCA := selfSignedTestCA(t, "long-gone-pod", now.Add(-time.Hour))
+	bundle = mergeCABundle(bundle, expiredCA)
+
+	require.Equal(t, 2, countCertsInBundle(t, bundle),
+		"an expired entry must be pruned even when there was room under maxRetainedCAs to keep it")
+	require.NotContains(t, string(bundle), string(expiredCA[:64]))
 }
 
 // --- webhookCertExpiryCheck ---------------------------------------------

@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -182,26 +183,51 @@ func webhookServiceDNSNames(serviceName, namespace string) []string {
 	}
 }
 
+// maxRetainedCAs bounds how many distinct CAs mergeCABundle keeps in a
+// caBundle at once. Every process restart mints a brand-new, random ECDSA
+// CA -- unlike a cert-manager-style setup, there is no persistent key
+// identity for "the same CA" to be reused across restarts, so dedup-by-byte
+// -equality (see mergeCABundle's own keepValid) does NOT bound growth on its
+// own: three restarts of the very same replica produce three distinct CAs,
+// each a permanently-valid trust anchor (webhookCertificateValidity is 10
+// years) for a private key that no longer exists anywhere the moment that
+// Pod exits. Left unbounded, a operator restarted daily would accumulate
+// hundreds of live trust anchors over the project's lifetime -- an
+// unbounded-growth problem AND a quietly widening trust surface, on the one
+// field this whole design exists to keep tightly scoped.
+//
+// 3 is not arbitrary: it is exactly what the two legitimate reasons for
+// more-than-one-CA (see mergeCABundle's own doc comment) need at once --
+// one rolling update's old+new CA overlap (2) plus one full extra generation
+// of margin for a second rollout landing before the first has fully settled,
+// or a genuinely down replica lagging a step behind the others. A CA whose
+// process has already exited has no ongoing reason to stay trusted; keeping
+// only the most recent few (by NotBefore, newest first) is what "trust
+// exists only as long as something still needs it" looks like here.
+const maxRetainedCAs = 3
+
 // mergeCABundle folds newCAPEM into existing (a webhook's current
 // clientConfig.caBundle, zero or more concatenated PEM CERTIFICATE blocks)
 // by APPENDING rather than overwriting: every still-valid certificate
-// already in existing is kept, newCAPEM's own certificate is added, and
-// anything already expired is pruned. Malformed or non-certificate PEM
-// blocks are skipped rather than failing the whole patch -- a defensively
-// tolerant read of a field only this process's own previous generations
-// have ever written.
+// already in existing is kept, newCAPEM's own certificate is added, anything
+// already expired is pruned, and -- see maxRetainedCAs' own comment -- only
+// the maxRetainedCAs most recently-issued (by NotBefore) survive; older
+// surviving entries are dropped even though they are not yet expired.
+// Malformed or non-certificate PEM blocks are skipped rather than failing
+// the whole patch -- a defensively tolerant read of a field only this
+// process's own previous generations have ever written.
 //
-// This is what makes both a rolling update AND running more than one
-// replica safe, neither of which a plain overwrite would be:
+// Appending (before the cap trims it back down) is what makes both a
+// rolling update AND running more than one replica safe, neither of which a
+// plain overwrite would be:
 //
-//   - Rolling update: the new Pod's Default() -- via cmd/plant-operator's
-//     own certificate bootstrap -- patches its own, brand-new CA into the
-//     caBundle BEFORE it is marked Ready, while the OLD Pod is still the
-//     Service's only endpoint and is still presenting the OLD leaf
-//     certificate. Overwriting here would mean the API server stops
-//     trusting the old (still-serving) certificate the instant the new
-//     Pod's caBundle patch lands, well before traffic ever reaches the new
-//     Pod -- every Plant write fails x509 verification for the whole
+//   - Rolling update: the new Pod's certificate bootstrap patches its own,
+//     brand-new CA into the caBundle BEFORE it is marked Ready, while the
+//     OLD Pod is still the Service's only endpoint and is still presenting
+//     the OLD leaf certificate. Overwriting here would mean the API server
+//     stops trusting the old (still-serving) certificate the instant the
+//     new Pod's caBundle patch lands, well before traffic ever reaches the
+//     new Pod -- every Plant write fails x509 verification for the whole
 //     readiness window. Appending keeps the old CA in the bundle
 //     throughout, so the still-serving old Pod stays trusted right up until
 //     it stops serving.
@@ -214,16 +240,14 @@ func webhookServiceDNSNames(serviceName, namespace string) []string {
 //     verification against whichever replica isn't the most recent writer.
 //     Appending means the caBundle accumulates every currently-running
 //     replica's CA, and any of them can be dialed successfully.
-//
-// Certificates are never proactively removed once trusted except by
-// expiring (webhookCertificateValidity is 10 years, so in practice this
-// bundle only ever grows across this project's lifetime -- an acceptable
-// trade for a demo-scale operator that is restarted at most a handful of
-// times, not a production fleet restarting thousands of times a day).
 func mergeCABundle(existing, newCAPEM []byte) []byte {
 	now := time.Now()
 	seen := make(map[string]bool)
-	var merged []byte
+	type entry struct {
+		block *pem.Block
+		cert  *x509.Certificate
+	}
+	var entries []entry
 
 	keepValid := func(pemBytes []byte) {
 		rest := pemBytes
@@ -248,12 +272,31 @@ func mergeCABundle(existing, newCAPEM []byte) []byte {
 				continue // already present (e.g. this exact CA survived from a previous merge)
 			}
 			seen[key] = true
-			merged = append(merged, pem.EncodeToMemory(block)...)
+			entries = append(entries, entry{block: block, cert: cert})
 		}
 	}
 
 	keepValid(existing)
 	keepValid(newCAPEM)
+
+	// Newest first, so truncating to maxRetainedCAs keeps the most
+	// recently-issued CAs and drops the oldest -- a CA whose process has
+	// already exited (which, for anything past position 0, this one might
+	// well have) has no ongoing reason to remain trusted. NotBefore, not
+	// NotAfter: every CA this process mints shares the same
+	// webhookCertificateValidity, so NotAfter would not actually order them
+	// by issuance recency the way NotBefore does.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].cert.NotBefore.After(entries[j].cert.NotBefore)
+	})
+	if len(entries) > maxRetainedCAs {
+		entries = entries[:maxRetainedCAs]
+	}
+
+	var merged []byte
+	for _, e := range entries {
+		merged = append(merged, pem.EncodeToMemory(e.block)...)
+	}
 	return merged
 }
 

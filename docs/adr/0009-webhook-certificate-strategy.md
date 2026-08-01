@@ -180,13 +180,43 @@ design shipped with first) would have been:
   replica's CA, so any of them can be dialed successfully. `replicaCount > 1`
   is therefore genuinely safe for the webhook server too, not merely
   tolerated -- see `values.schema.json`'s own updated description.
-- **Bundle growth is bounded by pruning, not by count.** Certificates are
-  never proactively evicted except by expiring; with `webhookCertificateValidity`
-  at 10 years, the bundle accumulates one entry per Pod that has ever
-  patched it in, for up to 10 years. For this project's actual scale (a
-  demo-grade operator restarted a handful of times, not a production fleet
-  restarting thousands of times a day) that is a bounded, acceptable amount
-  of growth, not an unbounded leak.
+- **Bundle growth is capped by count, not merely bounded by pruning.** An
+  earlier version of this design relied on pruning-by-expiry alone, reasoning
+  that a demo-grade operator's restart frequency would keep growth
+  "acceptable." That reasoning was wrong: every restart mints a brand-new,
+  random ECDSA CA -- there is no persistent key identity for "the same CA"
+  the way a cert-manager-issued one would have, so `mergeCABundle`'s
+  dedup-by-byte-equality does NOT collapse restarts into one entry, only
+  exact retries of the same generation. With `webhookCertificateValidity` at
+  10 years, pruning-by-expiry effectively never fires either. An operator
+  restarted daily would accumulate hundreds of live, permanently-valid trust
+  anchors over the project's lifetime -- unbounded growth AND a quietly
+  widening trust surface, on the exact field this whole design exists to
+  keep tightly scoped. `mergeCABundle` now also caps the bundle at
+  `maxRetainedCAs` (3) entries, keeping the most recently-issued (by
+  `NotBefore`) and dropping the rest regardless of whether they've expired
+  yet: a CA whose process has already exited has no ongoing reason to stay
+  trusted. 3 covers one rolling update's old+new overlap (2) plus one full
+  extra generation of margin. Verified live: `caBundle` grew across two
+  consecutive redeploys and settled at 2 entries (old + new CA, both
+  currently-running-equivalent), never exceeding 3.
+- **The alternative not taken: persisting the CA in a Secret.** The
+  production-grade answer to "avoid minting a new CA on every restart"
+  entirely is to generate the CA once, store it in a `Secret`, and have
+  every subsequent process start read the existing one back out rather than
+  minting fresh -- the cert-manager-adjacent pattern this project otherwise
+  avoids installing a whole component for. It was deliberately not taken
+  here: it would require granting `plant-operator`'s ServiceAccount RBAC to
+  read (and, for the first-ever start, create) a `Secret` -- a permission
+  this project has pointedly avoided everywhere else (see
+  `config/rbac/role.yaml`: no `secrets` rule exists at all, and the live
+  e2e suite explicitly asserts `plant-operator` cannot read secrets
+  cluster-wide). Capping the bundle at `maxRetainedCAs` gets the practical
+  benefit -- a caBundle that does not grow without limit -- without adding
+  that RBAC surface. This is a choice, not an oversight: if a future need
+  ever justifies Secret access for some other reason, revisiting CA
+  persistence at the same time would be the natural next step; until then,
+  the cap is the intentionally cheaper trade.
 
 ### RBAC: a real, narrowly-scoped privilege increase
 
