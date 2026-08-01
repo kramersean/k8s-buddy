@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -212,7 +213,7 @@ func TestWork_ErrorRateOne_AlwaysFails(t *testing.T) {
 
 	var body workResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
-	require.Equal(t, workOutcomeFailure, body.Outcome)
+	require.Equal(t, telemetry.OutcomeFailure, body.Outcome)
 
 	metric, ok := findSeries(t, reg, "buddy_work_requests_total", map[string]string{"outcome": "failure"})
 	require.True(t, ok, "expected a failure series in buddy_work_requests_total")
@@ -235,14 +236,20 @@ func TestWork_ErrorRateZero_AlwaysSucceeds(t *testing.T) {
 
 	var body workResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
-	require.Equal(t, workOutcomeSuccess, body.Outcome)
+	require.Equal(t, telemetry.OutcomeSuccess, body.Outcome)
 
 	metric, ok := findSeries(t, reg, "buddy_work_requests_total", map[string]string{"outcome": "success"})
 	require.True(t, ok)
 	require.Equal(t, 1.0, metric.GetCounter().GetValue())
 
-	_, failed := findSeries(t, reg, "buddy_work_requests_total", map[string]string{"outcome": "failure"})
-	require.False(t, failed, "an all-success run must not create a failure series")
+	// The failure series always EXISTS -- telemetry.NewMetrics
+	// pre-initializes all three outcomes at 0 so a scrape never reads "no
+	// data" for an outcome that simply has not happened yet -- but an
+	// all-success run must leave it at exactly 0.
+	failure, ok := findSeries(t, reg, "buddy_work_requests_total", map[string]string{"outcome": "failure"})
+	require.True(t, ok, "the failure series must be pre-initialized, not absent")
+	require.Equal(t, 0.0, failure.GetCounter().GetValue(),
+		"an all-success run must leave the failure counter at 0")
 }
 
 func TestWork_RecordsDurationHistogramObservation(t *testing.T) {
@@ -279,9 +286,9 @@ func TestWork_DelayExceedsBudget_ReturnsDistinctWarningBody(t *testing.T) {
 
 	var body workResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
-	require.Equal(t, workOutcomeWarning, body.Outcome)
+	require.Equal(t, telemetry.OutcomeWarning, body.Outcome)
 
-	require.NotEqual(t, workMessage(workOutcomeSuccess, 0, 0), body.Message,
+	require.NotEqual(t, workMessage(telemetry.OutcomeSuccess, 0, 0), body.Message,
 		"a warning's message body must differ from a success's")
 
 	metric, ok := findSeries(t, reg, "buddy_work_requests_total", map[string]string{"outcome": "warning"})
@@ -329,7 +336,7 @@ func TestWork_ShippedDefaults_WarningIsReachable(t *testing.T) {
 	require.LessOrEqual(t, reachableOverBudgetDelay, shippedWorkMaxDelay)
 
 	outcome, status := s.sampleWorkOutcome(reachableOverBudgetDelay)
-	require.Equal(t, workOutcomeWarning, outcome)
+	require.Equal(t, telemetry.OutcomeWarning, outcome)
 	require.Equal(t, http.StatusOK, status)
 }
 
@@ -459,4 +466,67 @@ func TestWithMetrics_UnmatchedPath_NeverRecordedAsRawPath(t *testing.T) {
 	})
 	require.True(t, ok, "expected the unmatched request to be recorded under the placeholder series")
 	require.Equal(t, 1.0, metric.GetCounter().GetValue())
+}
+
+// -- middleware: request logging level ------------------------------------
+
+// newLoggingTestServer builds a Server whose logger writes JSON at Debug
+// level into the returned buffer, so a test can assert not just that a
+// line was emitted but at what level.
+func newLoggingTestServer(t *testing.T) (*Server, *bytes.Buffer) {
+	t.Helper()
+
+	reg := prometheus.NewRegistry()
+	m := telemetry.NewMetrics(reg, telemetry.BuildInfo{
+		Version: "test", Commit: "test", GoVersion: "go-test",
+	})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	return New(Config{PlantName: "fernie", Species: "fern"}, logger, m, reg), &buf
+}
+
+// loggedLevelFor returns the "level" field of the single "http request"
+// line emitted for a request to path.
+func loggedLevelFor(t *testing.T, path string) string {
+	t.Helper()
+
+	s, buf := newLoggingTestServer(t)
+	doRequest(s, http.MethodGet, path, nil)
+
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var entry struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Msg == "http request" {
+			return entry.Level
+		}
+	}
+
+	t.Fatalf("no \"http request\" log line was emitted for %s", path)
+	return ""
+}
+
+// TestWithRequestLogging_ProbesLogAtDebug_EverythingElseAtInfo pins the fix
+// for a real signal-to-noise problem: the kubelet polls /readyz every 2s
+// and /healthz every 10s forever, so at Info those two routes were 99.6%
+// of all log lines on a live pod and buried the graceful-shutdown phase
+// messages that exist to be read during a rollout.
+func TestWithRequestLogging_ProbesLogAtDebug_EverythingElseAtInfo(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		require.Equalf(t, "DEBUG", loggedLevelFor(t, path),
+			"%s is a kubelet-driven probe and must not log at Info", path)
+	}
+
+	for _, path := range []string{"/status", "/work", "/no/such/route"} {
+		require.Equalf(t, "INFO", loggedLevelFor(t, path),
+			"%s is real traffic and must stay visible at Info", path)
+	}
 }

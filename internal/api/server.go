@@ -86,13 +86,10 @@ type Server struct {
 	randMu sync.Mutex
 	rand   *rand.Rand
 
-	// totalWork and failedWork are lifetime counters (not a rolling
-	// window) feeding /status's self-reported ErrorRate. See
-	// currentReport's doc comment for why this package stops at a
-	// lifetime ratio rather than reimplementing a windowed percentile
-	// tracker for latency too.
-	totalWork  atomic.Int64
-	failedWork atomic.Int64
+	// work is the rolling window of recent /work observations that feeds
+	// the ErrorRate and P95Latency signals on /status. See window.go, and
+	// currentReport below, for why a window rather than lifetime counters.
+	work workWindow
 }
 
 // New constructs a Server. It never fails -- there is nothing in Config
@@ -179,29 +176,35 @@ func (s *Server) SetReady(ready bool) {
 // currentReport builds this instant's mood.Report from the server's live
 // state.
 //
-// Ready comes straight from s.ready -- this process's own in-memory
-// state, known with total confidence. ErrorRate is a lifetime ratio of
-// failedWork/totalWork from /work's own outcomes; cheap enough to keep
-// exactly, so it does.
+// Ready comes straight from s.ready -- this process's own in-memory state,
+// known with total confidence. ErrorRate and P95Latency both come from the
+// rolling window of the last workWindowSize /work observations (see
+// window.go), so the mood tracks how this pod is behaving *right now*.
 //
-// P95Latency is deliberately left at its zero value. Computing a real
-// percentile requires a windowed quantile estimator, and this package
-// already feeds every /work observation into
-// buddy_work_duration_seconds (see workHandler and ObserveWork) --
-// Prometheus computes exactly that percentile, over a real sliding
-// window, via histogram_quantile, more correctly than an in-process
-// approximation could. Reimplementing that here would duplicate logic
-// Prometheus already does better and risk this endpoint's number
-// disagreeing with what Grafana shows for the same data.
+// The window replaced an earlier design that used lifetime failed/total
+// counters for ErrorRate and left P95Latency at its zero value on the
+// theory that Prometheus's histogram_quantile computes percentiles better.
+// It does -- for dashboards. But it left /status structurally unable to
+// report anything but a perfect latency score, and lifetime counters mean
+// a pod that served a million clean requests and is failing every request
+// now still reports a near-zero error rate. Between them, five of the six
+// moods were unreachable in the shipped system: /status was a constant, not
+// a signal. Prometheus still gets every observation via ObserveWork and is
+// still the right place to graph the percentile over time; this window is
+// what lets the pod answer "how am I doing?" about itself.
+//
+// RestartCount stays 0 deliberately. Container restarts are a property of
+// the Pod, visible only in its status via the Kubernetes API -- a process
+// cannot count its own restarts, since a restart is precisely the event
+// that destroys the memory that would hold the count. Reporting anything
+// but 0 from in here would be a guess.
 func (s *Server) currentReport() mood.Report {
-	var errorRate float64
-	if total := s.totalWork.Load(); total > 0 {
-		errorRate = float64(s.failedWork.Load()) / float64(total)
-	}
+	errorRate, p95, _ := s.work.stats()
 
 	signals := mood.Signals{
 		Ready:         s.ready.Load(),
 		ErrorRate:     errorRate,
+		P95Latency:    p95,
 		LatencyBudget: s.cfg.LatencyBudget,
 	}
 

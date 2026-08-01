@@ -5,16 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-)
 
-// Outcome labels for /work. These are the exact strings telemetry.
-// ObserveWork records under its "outcome" label and
-// buddy_work_requests_total documents as its label values -- keep them in
-// sync with that contract if they ever change.
-const (
-	workOutcomeSuccess = "success"
-	workOutcomeWarning = "warning"
-	workOutcomeFailure = "failure"
+	"github.com/sean-kramer/k8s-buddy/internal/telemetry"
 )
 
 // unmatchedRoutePattern is the stable placeholder the metrics middleware
@@ -85,8 +77,10 @@ func (s *Server) statusHandler(w http.ResponseWriter, _ *http.Request) {
 
 // workResponse is the /work response body.
 type workResponse struct {
-	// Outcome is one of workOutcomeSuccess, workOutcomeWarning, or
-	// workOutcomeFailure.
+	// Outcome is one of telemetry.OutcomeSuccess,
+	// telemetry.OutcomeWarning, or telemetry.OutcomeFailure -- the same
+	// vocabulary the "outcome" metric label uses, from the same constants,
+	// so the JSON body and the metrics can never disagree.
 	Outcome string `json:"outcome"`
 	// DelayMs is the simulated delay this request slept for, in
 	// milliseconds.
@@ -104,16 +98,20 @@ type workResponse struct {
 // ObserveWork before the response is written, so
 // buddy_work_requests_total and buddy_work_duration_seconds always agree
 // with what the caller actually received.
+//
+// The same observation is also pushed into s.work, the rolling window
+// /status derives its ErrorRate and P95Latency signals from -- so calling
+// /work is what actually moves the plant's mood. Both recordings happen
+// before the response is written, so a client that reads /status
+// immediately after its /work response comes back is guaranteed to see
+// that request already reflected.
 func (s *Server) workHandler(w http.ResponseWriter, _ *http.Request) {
 	delay := s.randomWorkDelay()
 	time.Sleep(delay)
 
 	outcome, status := s.sampleWorkOutcome(delay)
 
-	s.totalWork.Add(1)
-	if outcome == workOutcomeFailure {
-		s.failedWork.Add(1)
-	}
+	s.work.observe(delay, outcome == telemetry.OutcomeFailure)
 	s.metrics.ObserveWork(outcome, delay)
 
 	resp := workResponse{
@@ -132,9 +130,9 @@ func (s *Server) workHandler(w http.ResponseWriter, _ *http.Request) {
 // both.
 func workMessage(outcome string, delay, budget time.Duration) string {
 	switch outcome {
-	case workOutcomeFailure:
+	case telemetry.OutcomeFailure:
 		return "dropped a leaf: simulated work failure"
-	case workOutcomeWarning:
+	case telemetry.OutcomeWarning:
 		return fmt.Sprintf("took %s, over the %s latency budget", delay, budget)
 	default:
 		return "watered on time"
@@ -178,12 +176,12 @@ func (s *Server) sampleWorkOutcome(delay time.Duration) (outcome string, status 
 	s.randMu.Unlock()
 
 	if roll < s.cfg.WorkErrorRate {
-		return workOutcomeFailure, http.StatusInternalServerError
+		return telemetry.OutcomeFailure, http.StatusInternalServerError
 	}
 	if s.cfg.LatencyBudget > 0 && delay > s.cfg.LatencyBudget {
-		return workOutcomeWarning, http.StatusOK
+		return telemetry.OutcomeWarning, http.StatusOK
 	}
-	return workOutcomeSuccess, http.StatusOK
+	return telemetry.OutcomeSuccess, http.StatusOK
 }
 
 // chaosReadinessRequest is the POST /chaos/readiness request body.

@@ -172,6 +172,42 @@ func TestNewMetrics_BuildInfo(t *testing.T) {
 	require.Equal(t, 1.0, metric.GetGauge().GetValue())
 }
 
+// TestNewMetrics_WorkSeriesPreInitializedToZero pins the fix for a
+// staleness bug: a Prometheus *Vec exports nothing for a label combination
+// it has never been handed, so before this pre-initialization a pod that
+// had not yet served a /work request exported no buddy_work_requests_total
+// series at all -- an alert on the failure rate would evaluate against "no
+// data" instead of a truthful 0.
+func TestNewMetrics_WorkSeriesPreInitializedToZero(t *testing.T) {
+	t.Parallel()
+
+	_, reg := newTestMetrics(t)
+
+	// Deliberately no ObserveWork call anywhere in this test.
+	for _, outcome := range telemetry.Outcomes() {
+		counter := findMetric(t, reg, "buddy_work_requests_total", map[string]string{"outcome": outcome})
+		require.NotNil(t, counter.Counter, "buddy_work_requests_total{outcome=%q} must exist before any observation", outcome)
+		require.Equalf(t, 0.0, counter.GetCounter().GetValue(), "outcome %q must start at 0, not absent", outcome)
+
+		histogram := findMetric(t, reg, "buddy_work_duration_seconds", map[string]string{"outcome": outcome})
+		require.NotNil(t, histogram.Histogram, "buddy_work_duration_seconds{outcome=%q} must exist before any observation", outcome)
+		require.EqualValuesf(t, 0, histogram.GetHistogram().GetSampleCount(), "outcome %q must start with 0 samples", outcome)
+	}
+}
+
+// TestOutcomes_MatchesTheDocumentedVocabulary guards the single source of
+// truth: these three strings are simultaneously the "outcome" metric label
+// values and /work's response body values, so a change here is a breaking
+// change to both contracts at once.
+func TestOutcomes_MatchesTheDocumentedVocabulary(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t,
+		[]string{"success", "warning", "failure"},
+		telemetry.Outcomes(),
+	)
+}
+
 func TestObserveWork_RecordsCounterAndHistogram(t *testing.T) {
 	t.Parallel()
 	m, reg := newTestMetrics(t)

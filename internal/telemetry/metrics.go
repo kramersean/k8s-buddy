@@ -28,6 +28,29 @@ type BuildInfo struct {
 	GoVersion string
 }
 
+// The complete outcome vocabulary for a unit of simulated work. These are
+// the canonical definitions: they are the "outcome" label values of
+// buddy_work_requests_total and buddy_work_duration_seconds, and they are
+// also the strings internal/api puts in the /work response body. They live
+// here, in the package that owns the metric contract, so there is exactly
+// one source of truth -- a second copy in the HTTP layer could drift and
+// silently split one time series into two.
+const (
+	// OutcomeSuccess is a /work request that finished within budget.
+	OutcomeSuccess = "success"
+	// OutcomeWarning is a /work request that succeeded but exceeded the
+	// configured latency budget.
+	OutcomeWarning = "warning"
+	// OutcomeFailure is a /work request that failed.
+	OutcomeFailure = "failure"
+)
+
+// Outcomes returns every value in the outcome vocabulary. Each call
+// returns a new slice, so callers may freely mutate the result.
+func Outcomes() []string {
+	return []string{OutcomeSuccess, OutcomeWarning, OutcomeFailure}
+}
+
 // workDurationBuckets are the histogram boundaries, in seconds, for
 // buddy_work_duration_seconds. They span 5ms to 5s so both a fast success
 // and a deliberately slow simulated /work request land in a meaningful
@@ -64,6 +87,16 @@ type Metrics struct {
 //
 // buddy_build_info is set to 1 with bi's labels exactly once, here, since
 // build metadata is fixed for the lifetime of the process.
+//
+// Every /work outcome series is pre-initialized to 0 before this returns.
+// A Prometheus *Vec exports nothing at all for a label combination it has
+// never been given, so without this a freshly started pod would export no
+// buddy_work_requests_total series whatsoever until its first /work call:
+// an alert or dashboard querying the failure rate would read "no data"
+// rather than the truthful 0, and rate() over a series that springs into
+// existence mid-window is not the same thing as rate() over a series that
+// was always there. This is the same staleness class SetHealth already
+// avoids by explicitly zeroing every inactive buddy_mood series.
 func NewMetrics(reg prometheus.Registerer, bi BuildInfo) *Metrics {
 	factory := promauto.With(reg)
 
@@ -95,6 +128,15 @@ func NewMetrics(reg prometheus.Registerer, bi BuildInfo) *Metrics {
 		}, []string{"path", "method", "code"}),
 	}
 
+	// WithLabelValues creates the child collector for a label combination
+	// if it does not already exist, so simply asking for each outcome is
+	// what materializes the series at 0. Both the counter and the
+	// histogram are pre-created, so their outcome label sets always match.
+	for _, outcome := range Outcomes() {
+		m.workRequests.WithLabelValues(outcome)
+		m.workDuration.WithLabelValues(outcome)
+	}
+
 	buildInfo := factory.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "buddy_build_info",
 		Help: "Always 1; labels report the running build's version, commit, and Go version.",
@@ -107,7 +149,9 @@ func NewMetrics(reg prometheus.Registerer, bi BuildInfo) *Metrics {
 // ObserveWork records the outcome and latency of a single /work request. It
 // increments buddy_work_requests_total for outcome and records d, in
 // seconds, into buddy_work_duration_seconds for the same outcome. outcome
-// is expected to be one of "success", "warning", or "failure".
+// is expected to be one of OutcomeSuccess, OutcomeWarning, or
+// OutcomeFailure; all three already exist at 0 (see NewMetrics), so this
+// method only ever advances a series that is already being exported.
 func (m *Metrics) ObserveWork(outcome string, d time.Duration) {
 	m.workRequests.WithLabelValues(outcome).Inc()
 	m.workDuration.WithLabelValues(outcome).Observe(d.Seconds())
@@ -119,8 +163,9 @@ func (m *Metrics) ObserveWork(outcome string, d time.Duration) {
 // "GET /healthz"), never the raw request URL. Raw URLs carry query strings,
 // path parameters, and whatever an attacker or client probes with, all of
 // which would make the path label unbounded in cardinality -- exactly what
-// Prometheus label design must avoid. Task 4's middleware is responsible
-// for resolving the matched pattern before calling this method.
+// Prometheus label design must avoid. internal/api's withMetrics
+// middleware is responsible for resolving the matched pattern before
+// calling this method.
 //
 // code is converted to its decimal string form (e.g. "200"), since
 // Prometheus label values are always strings.

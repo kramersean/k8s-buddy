@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -126,6 +127,14 @@ func routePattern(r *http.Request) string {
 	return r.Pattern
 }
 
+// probeRoutes are the routes the kubelet polls on a fixed schedule rather
+// than routes a human or a client ever calls. Requests to them are logged
+// at Debug, not Info -- see withRequestLogging for why.
+var probeRoutes = map[string]bool{
+	"/healthz": true,
+	"/readyz":  true,
+}
+
 // withRequestLogging assigns a per-request ID, attaches it to the
 // response as a header and to the request's context for any downstream
 // code that wants it, and emits exactly one structured log line per
@@ -134,6 +143,19 @@ func routePattern(r *http.Request) string {
 // and panic recovery too, giving an accurate end-to-end duration and a
 // correct final status even for a request that ended in a recovered
 // panic.
+//
+// Probe requests are logged at Debug; everything else at Info. The probes
+// run on a fixed cadence forever (readiness every 2s, liveness every 10s,
+// per the Deployment), so on a live pod they are the overwhelming majority
+// of all traffic -- a sample from this cluster showed 1385 /readyz and 278
+// /healthz lines against 5 /status lines, 99.6% noise. At Info they bury
+// the lines that actually carry information, in particular the ordered
+// graceful-shutdown phase messages that exist precisely to be READ during
+// a rollout. Dropping probes to Debug keeps them available (set
+// BUDDY_LOG_LEVEL=debug) without letting a timer-driven heartbeat drown
+// out events. Nothing is silenced: every probe is still counted in
+// buddy_http_requests_total, which is the right instrument for "how many"
+// anyway.
 func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := newRequestID()
@@ -145,10 +167,16 @@ func (s *Server) withRequestLogging(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		duration := time.Since(start)
 
-		s.log.Info("http request",
+		route := routePattern(r)
+		level := slog.LevelInfo
+		if probeRoutes[route] {
+			level = slog.LevelDebug
+		}
+
+		s.log.Log(r.Context(), level, "http request",
 			"requestId", id,
 			"method", r.Method,
-			"route", routePattern(r),
+			"route", route,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"durationMs", duration.Milliseconds(),
