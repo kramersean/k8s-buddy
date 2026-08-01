@@ -332,9 +332,24 @@ have no controller tests at all; this one runs against a real API server.
    readiness, and comment that this is why.)*
 4. **Drift correction:** externally mutate the child Deployment's replica count,
    then assert the reconciler restores it.
-5. **Idempotence:** capture each child's `resourceVersion`, force a reconcile by
-   touching an unrelated annotation on the Plant, and assert the children's
-   `resourceVersion`s are unchanged.
+5. **Idempotence — and `resourceVersion` is NOT sufficient to prove it.**
+   *(Rewritten after Task 3's review found a Critical that this test, as
+   originally specified, would have passed.)* If a mutate function zeroes a
+   server-defaulted field, the operator issues a PUT on every pass, but the API
+   server re-defaults the incoming object, etcd sees identical bytes, and
+   `resourceVersion` never bumps. The write storm is real and the test is green.
+
+   So assert the **write itself**, not its side effect. Wrap the manager's client
+   in a counting `client.Client` decorator that tallies `Update`, `Patch`, and
+   `Create` calls per GVK, and assert that a second reconcile of an unchanged
+   `Plant` performs **zero** writes to all five children and zero status writes.
+   Additionally assert `controllerutil.CreateOrUpdate` returns
+   `OperationResultNone` on the steady-state pass.
+
+   Also add the property the unit tests could only establish by inspection:
+   calling `computeStatus` twice, feeding the first result back in, must preserve
+   each condition's `LastTransitionTime` — proving `meta.SetStatusCondition` is
+   doing the work and no code path mints a fresh timestamp on a no-op pass.
 6. Updating `spec.replicas` propagates to the Deployment and to
    `status.desiredReplicas`.
 7. Updating `spec.resourceProfile` changes the container's resources.
