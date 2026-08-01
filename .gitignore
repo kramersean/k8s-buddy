@@ -1,0 +1,37 @@
+# Binaries
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+
+# Local tooling downloaded by the Makefile
+.tools/
+testbin/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local overrides & anything secret-shaped
+*.local.yaml
+*.local.yml
+kubeconfig
+kubeconfig.*
+.env
+.env.*
+*.pem
+*.key
+
+# Helm packaging output
+charts/**/charts/
+charts/**/Chart.lock
+*.tgz
