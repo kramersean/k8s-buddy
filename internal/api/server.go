@@ -11,6 +11,8 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -59,6 +61,17 @@ type Config struct {
 	// one; tests inject a fixed-seed *rand.Rand so /work's behavior is
 	// deterministic and assertable.
 	Rand *rand.Rand
+	// HealthRefreshInterval is how often RunHealthRefresher recomputes and
+	// publishes buddy_health_score, buddy_mood, and buddy_ready, independent
+	// of whether anything has called /status. See RunHealthRefresher's own
+	// doc comment for why this exists at all: without it, those three
+	// gauges are wrong -- not merely stale -- on every pod nothing has ever
+	// curled /status on, which in practice is most pods most of the time,
+	// since Prometheus scrapes /metrics, never /status. cmd/buddy-api is
+	// responsible for validating this is positive before RunHealthRefresher
+	// is ever called, the same way it validates every other Config field
+	// New itself does not (see New's own doc comment).
+	HealthRefreshInterval time.Duration
 }
 
 // Server is buddy-api's HTTP service. Build one with New and mount its
@@ -221,4 +234,64 @@ func (s *Server) currentReport() mood.Report {
 // than a value stale since process start.
 func (s *Server) syncMetrics(r mood.Report) {
 	s.metrics.SetHealth(r.HealthScore, r.Mood, r.Ready)
+}
+
+// RunHealthRefresher periodically pushes this Server's current health
+// signals into Prometheus, independent of whether anything has ever called
+// /status.
+//
+// Why this exists: buddy_health_score, buddy_mood, and buddy_ready used to
+// be set ONLY by statusHandler and SetReady -- both request/event-driven,
+// never by anything Prometheus's own scrape of /metrics triggers. A pod
+// that has served real traffic, is perfectly healthy, and that no human or
+// script has ever curled /status on therefore reported health 0, ready 0,
+// and NO buddy_mood series at all (telemetry.NewMetrics pre-zeroes every
+// mood series only at construction time via SetHealth's own zeroing logic,
+// which itself is never invoked until the first call) -- indistinguishable
+// from a dead plant on any dashboard or alert built against those three
+// metrics, for a fleet that was never anything but healthy. This is the
+// same class of bug Plan 1 already fixed once, for buddy_work_requests_total
+// and buddy_work_duration_seconds, by pre-initializing every outcome series
+// at construction time in telemetry.NewMetrics; these three gauges slipped
+// through the same door because they are computed from LIVE state (the
+// rolling /work window, current readiness) rather than a fixed label
+// vocabulary, so there was nothing to pre-initialize -- only something to
+// keep refreshing.
+//
+// RunHealthRefresher recomputes the signal through s.currentReport, the
+// EXACT same method statusHandler calls, and pushes it with the same
+// s.syncMetrics statusHandler and SetReady already use -- so the gauge and
+// whatever a human sees from /status can never disagree, and there is
+// exactly one place (currentReport) that derives a mood.Report from this
+// Server's state, never two.
+//
+// It blocks until ctx is done, at which point it returns nil -- callers
+// run it in its own goroutine (see cmd/buddy-api's run(), which passes the
+// same context signal.NotifyContext returns, so this goroutine stops at
+// the very start of the graceful shutdown sequence, before anything else,
+// and never blocks or delays termination). interval must be positive:
+// cmd/buddy-api treats a non-positive BUDDY_HEALTH_REFRESH_INTERVAL as a
+// startup config error, the same way it treats a non-positive
+// BUDDY_LATENCY_BUDGET or BUDDY_SHUTDOWN_DELAY -- never a silently disabled
+// refresher and never a busy loop. This method still checks and returns an
+// error rather than trusting that validation blindly, since a defensive
+// check here is what makes the "config error, not a busy loop" contract
+// directly testable in this package without going through cmd/buddy-api's
+// own env parsing at all.
+func (s *Server) RunHealthRefresher(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("health refresh interval must be positive, got %s", interval)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			s.syncMetrics(s.currentReport())
+		}
+	}
 }

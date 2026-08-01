@@ -100,13 +100,14 @@ func run() error {
 	metrics := telemetry.NewMetrics(reg, buildInfo)
 
 	srv := api.New(api.Config{
-		PlantName:            cfg.plantName,
-		Species:              cfg.species,
-		LatencyBudget:        cfg.latencyBudget,
-		WorkErrorRate:        cfg.workErrorRate,
-		WorkMinDelay:         cfg.workMinDelay,
-		WorkMaxDelay:         cfg.workMaxDelay,
-		EnableChaosEndpoints: cfg.enableChaosEndpoints,
+		PlantName:             cfg.plantName,
+		Species:               cfg.species,
+		LatencyBudget:         cfg.latencyBudget,
+		WorkErrorRate:         cfg.workErrorRate,
+		WorkMinDelay:          cfg.workMinDelay,
+		WorkMaxDelay:          cfg.workMaxDelay,
+		EnableChaosEndpoints:  cfg.enableChaosEndpoints,
+		HealthRefreshInterval: cfg.healthRefreshInterval,
 	}, logger, metrics, reg)
 
 	// One line, everything a human reading `kubectl logs` needs to know
@@ -126,6 +127,7 @@ func run() error {
 		"workMaxDelay", cfg.workMaxDelay.String(),
 		"chaosEndpointsEnabled", cfg.enableChaosEndpoints,
 		"shutdownDelay", cfg.shutdownDelay.String(),
+		"healthRefreshInterval", cfg.healthRefreshInterval.String(),
 	)
 
 	httpServer := &http.Server{
@@ -150,6 +152,19 @@ func run() error {
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Keeps buddy_health_score, buddy_mood, and buddy_ready correct on
+	// every scrape, independent of whether anything has ever called
+	// /status -- see RunHealthRefresher's own doc comment for the bug this
+	// closes. sigCtx is the same context the shutdown select below blocks
+	// on, so this goroutine stops at the very first moment shutdown begins
+	// (before gracefulShutdown's own phase 1), never leaking past process
+	// lifetime and never delaying termination.
+	go func() {
+		if err := srv.RunHealthRefresher(sigCtx, cfg.healthRefreshInterval); err != nil {
+			logger.Error("health refresher stopped", "error", err)
+		}
+	}()
 
 	select {
 	case err := <-serveErrs:
@@ -258,16 +273,17 @@ func gracefulShutdown(httpServer *http.Server, srv *api.Server, logger *slog.Log
 // config is buddy-api's resolved runtime configuration, parsed and
 // validated from environment variables by loadConfig.
 type config struct {
-	plantName            string
-	species              string
-	port                 int
-	logLevel             string
-	latencyBudget        time.Duration
-	workErrorRate        float64
-	workMinDelay         time.Duration
-	workMaxDelay         time.Duration
-	enableChaosEndpoints bool
-	shutdownDelay        time.Duration
+	plantName             string
+	species               string
+	port                  int
+	logLevel              string
+	latencyBudget         time.Duration
+	workErrorRate         float64
+	workMinDelay          time.Duration
+	workMaxDelay          time.Duration
+	enableChaosEndpoints  bool
+	shutdownDelay         time.Duration
+	healthRefreshInterval time.Duration
 }
 
 // loadConfig reads buddy-api's configuration from the environment. Every
@@ -351,6 +367,20 @@ func loadConfig() (config, error) {
 	}
 	if cfg.shutdownDelay < 0 {
 		return config{}, fmt.Errorf("invalid BUDDY_SHUTDOWN_DELAY: %s must not be negative", cfg.shutdownDelay)
+	}
+
+	if cfg.healthRefreshInterval, err = parseDurationEnv("BUDDY_HEALTH_REFRESH_INTERVAL", 5*time.Second); err != nil {
+		return config{}, err
+	}
+	// Non-positive isn't a valid "refresh instantly" or "disable the
+	// refresher" -- it's an invalid config, full stop. api.RunHealthRefresher
+	// treats it the same way (returns an error rather than busy-looping via
+	// a <=0 time.Ticker, which panics), but the check belongs here first: a
+	// misconfigured BUDDY_HEALTH_REFRESH_INTERVAL should fail loudly at
+	// startup, naming the bad value, not surface later as a goroutine that
+	// silently never started.
+	if cfg.healthRefreshInterval <= 0 {
+		return config{}, fmt.Errorf("invalid BUDDY_HEALTH_REFRESH_INTERVAL: %s must be a positive duration", cfg.healthRefreshInterval)
 	}
 
 	return cfg, nil
