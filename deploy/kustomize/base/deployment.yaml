@@ -1,3 +1,21 @@
+# THIS FILE HAS A GO TWIN: internal/controller/resources.go's DeploymentFor
+# builds the same hardened buddy-api workload for a Plant, so the operator can
+# reconcile it instead of applying a static manifest. Both descriptions are
+# deliberate and both stay -- see
+# docs/adr/0006-operator-reproduces-base-manifests.md for which is which and
+# why.
+#
+# They must not drift. internal/controller/manifest_drift_test.go parses THIS
+# FILE and asserts, field by field, that the security contexts, probe timings,
+# resource requests/limits, terminationGracePeriodSeconds, imagePullPolicy,
+# and container ports below match what DeploymentFor produces for an
+# equivalent Plant. Tightening a probe or a limit here without doing the same
+# in Go (or vice versa) fails `make test`.
+#
+# The places the two legitimately DIFFER -- the 3-key selector below vs the
+# operator's 2-key one, managed-by, serviceAccountName, the untagged image --
+# are asserted explicitly by that same test, with their reasons, so an
+# unintended change to one of those still fails too.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

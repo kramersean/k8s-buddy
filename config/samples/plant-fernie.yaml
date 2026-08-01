@@ -3,9 +3,18 @@
 # resourceProfile, wateringInterval, and latencyBudget are left unset so the
 # apiserver's defaulting fills them in, demonstrating that `spec: {}` --
 # effectively what's left here -- is already a fully valid, runnable Plant.
+#
+# namespace is set explicitly rather than left to the caller's current
+# context. A Plant applied with no namespace lands in `default`, which
+# carries neither Pod Security Admission's `restricted` profile nor any
+# NetworkPolicy -- so the operator's own workloads would be less constrained
+# than Plan 1's static ones. k8s-buddy-plants
+# (deploy/kustomize/plants/namespace.yaml) is labelled for `restricted`;
+# the per-Plant NetworkPolicy the operator generates supplies the rest.
 apiVersion: buddy.k8s-buddy.io/v1alpha1
 kind: Plant
 metadata:
+  namespace: k8s-buddy-plants
   name: fernie
 spec:
   species: fern

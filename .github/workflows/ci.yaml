@@ -345,6 +345,13 @@ jobs:
           kubectl kustomize deploy/kustomize/operator | \
             kubeconform -strict -summary -kubernetes-version 1.36.1 -
 
+      - name: Validate deploy/kustomize/plants (strict, real k8s schemas)
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/kustomize/plants | \
+            kubeconform -strict -summary -kubernetes-version 1.36.1 -
+
   # ---------------------------------------------------------------------------
   # e2e -- the important one. Stands up the same 3-node kind topology CI and
   # local dev both use, deploys buddy-api, and runs hack/demo.sh as a real
@@ -407,23 +414,21 @@ jobs:
       # Plan 2: the operator, exercised end to end on the same live cluster
       # the Plan 1 demo above just proved buddy-api on. This installs the
       # Plant CRD, builds and deploys plant-operator, applies the fernie
-      # sample, and -- the headline result of Plan 2 -- deletes the Plant and
-      # asserts every one of its five owned children is actually gone.
-      # envtest (internal/controller's suite, run in the `test` job) cannot
+      # sample into the PSA-`restricted` k8s-buddy-plants namespace, and --
+      # the headline result of Plan 2 -- deletes the Plant and asserts every
+      # one of its six owned children is actually gone. envtest
+      # (internal/controller's suite, run in the `test` job) cannot
       # demonstrate cascading garbage collection at all: it runs no garbage-
       # collector controller. This is the only place in CI that can.
+      #
+      # `make deploy-operator` now depends on docker-build-operator and
+      # kind-load-operator itself, so the two explicit steps that used to sit
+      # between install-crd and deploy-operator are gone -- the target is
+      # self-sufficient on a fresh cluster rather than relying on a caller
+      # remembering the ordering.
       # ---------------------------------------------------------------------
 
-      - name: make install-crd
-        run: make install-crd
-
-      - name: make docker-build-operator
-        run: make docker-build-operator
-
-      - name: make kind-load-operator
-        run: make kind-load-operator
-
-      - name: make deploy-operator
+      - name: make deploy-operator (builds, loads, installs the CRD, and deploys)
         run: make deploy-operator
 
       - name: Operator pod is Running and Ready
@@ -432,6 +437,14 @@ jobs:
           kubectl -n k8s-buddy-system wait --for=condition=Available deployment/plant-operator --timeout=120s
           kubectl -n k8s-buddy-system get pods -o wide
 
+      # The namespace, then the Plant. A Plant applied with no namespace
+      # would land in `default`, which carries no Pod Security Admission
+      # labels at all -- operator-managed pods would be strictly LESS
+      # constrained than the static ones the Plan 1 half of this job just
+      # deployed. Both sample Plants pin `namespace: k8s-buddy-plants`.
+      - name: Create the k8s-buddy-plants namespace (PSA restricted)
+        run: kubectl apply -k deploy/kustomize/plants
+
       - name: Apply the fernie Plant sample
         run: kubectl apply -f config/samples/plant-fernie.yaml
 
@@ -439,8 +452,8 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            desired="$(kubectl get plant fernie -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-            ready="$(kubectl get plant fernie -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+            desired="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+            ready="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
             if [ -n "$desired" ] && [ -n "$ready" ] && [ "$ready" = "$desired" ]; then
               echo "fernie ready: readyReplicas=$ready desiredReplicas=$desired"
               exit 0
@@ -451,22 +464,101 @@ jobs:
           echo "fernie never reached status.readyReplicas == spec.replicas" >&2
           exit 1
 
+      # A Plant's pods reaching Ready inside a namespace labelled
+      # `pod-security.kubernetes.io/enforce: restricted` IS the admission
+      # proof -- PSA rejects a non-conforming pod at create time, so the
+      # ReplicaSet would report a FailedCreate event and readyReplicas would
+      # never reach spec.replicas. This step makes the claim explicit rather
+      # than implied, and fails loudly if the label ever gets dropped from
+      # the namespace (which would make the wait above prove nothing).
+      - name: Assert the Plant's namespace actually enforces `restricted`
+        run: |
+          set -euo pipefail
+          enforce="$(kubectl get ns k8s-buddy-plants -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')"
+          if [ "$enforce" != "restricted" ]; then
+            echo "k8s-buddy-plants enforce label is '${enforce:-<unset>}', expected 'restricted'" >&2
+            exit 1
+          fi
+          echo "confirmed: k8s-buddy-plants enforces the restricted PSA profile, and fernie's pods were admitted under it"
+
       - name: Assert kubectl get plants shows a non-empty MOOD
         run: |
           set -euo pipefail
-          kubectl get plants
-          mood="$(kubectl get plant fernie -o jsonpath='{.status.mood}')"
+          kubectl -n k8s-buddy-plants get plants
+          mood="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.status.mood}')"
           if [ -z "$mood" ]; then
             echo "status.mood is empty; expected a populated Mood" >&2
             exit 1
           fi
           echo "fernie mood: $mood"
 
+      # THE SERVICEACCOUNT ASSERTION. This is the one that would have caught
+      # the Plan 2 regression: DeploymentFor set serviceAccountName,
+      # resources_test.go asserted it on the BUILDER's output, and
+      # mutateDeployment silently never copied it onto the live object -- so
+      # every pod ran as the namespace's `default` ServiceAccount while the
+      # Plant's own SA was created, owned, and garbage-collected purely for
+      # show. Asserting on the running PODS, not on the Deployment and not on
+      # the builder, is what makes it impossible to fake.
+      #
+      # `sort -u` collapses the three pods' values to a unique set, so this
+      # fails if ANY pod runs as anything other than fernie -- and the
+      # non-empty check catches the vacuous case where the selector matches
+      # no pods at all.
+      - name: Assert every Plant pod runs as the Plant's own ServiceAccount
+        run: |
+          set -euo pipefail
+          accounts="$(kubectl -n k8s-buddy-plants get pods -l buddy.k8s-buddy.io/plant=fernie \
+            -o jsonpath='{.items[*].spec.serviceAccountName}' | tr ' ' '\n' | sort -u)"
+          echo "serviceAccountName values across fernie's pods: ${accounts:-<none>}"
+          if [ -z "$accounts" ]; then
+            echo "no pods matched buddy.k8s-buddy.io/plant=fernie -- this assertion would pass vacuously" >&2
+            exit 1
+          fi
+          if [ "$accounts" != "fernie" ]; then
+            echo "expected every pod to run as ServiceAccount 'fernie', got: $accounts" >&2
+            kubectl -n k8s-buddy-plants get pods -l buddy.k8s-buddy.io/plant=fernie \
+              -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName >&2
+            exit 1
+          fi
+          echo "confirmed: all of fernie's pods run as ServiceAccount fernie"
+
+      # The scale subresource, exercised the way a human would. Without
+      # +kubebuilder:subresource:scale this command fails outright with "the
+      # server could not find the requested resource".
+      - name: kubectl scale the Plant and assert it takes effect
+        run: |
+          set -euo pipefail
+          kubectl -n k8s-buddy-plants scale plant fernie --replicas=5
+          for i in $(seq 1 30); do
+            spec="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.spec.replicas}')"
+            dep="$(kubectl -n k8s-buddy-plants get deploy fernie -o jsonpath='{.spec.replicas}')"
+            if [ "$spec" = "5" ] && [ "$dep" = "5" ]; then
+              echo "kubectl scale propagated: plant=$spec deployment=$dep"
+              kubectl -n k8s-buddy-plants get plants
+              kubectl -n k8s-buddy-plants scale plant fernie --replicas=3
+              exit 0
+            fi
+            echo "waiting for scale to propagate: plant=$spec deployment=$dep (attempt $i/30)"
+            sleep 2
+          done
+          echo "kubectl scale never propagated to the child Deployment" >&2
+          exit 1
+
+      # The curl pod runs in `default`, not in k8s-buddy-plants: that
+      # namespace enforces PSA `restricted`, and a stock curlimages/curl pod
+      # does not satisfy it (no explicit runAsNonRoot, no seccompProfile, no
+      # dropped capabilities), so it would be rejected at admission before it
+      # ever made a request. Reaching in across namespaces over the
+      # cluster-DNS FQDN also proves something stronger than a same-namespace
+      # curl would: the Plant's own NetworkPolicy admits TCP 8080 from any
+      # source (ADR 0003) while denying everything else, and this is the
+      # traffic that hole exists for.
       - name: Curl fernie's Service and confirm /status responds
         run: |
           set -euo pipefail
-          kubectl run curl-fernie --image=curlimages/curl:8.11.1 --restart=Never --rm -i \
-            --command -- curl -sf --max-time 5 http://fernie.default.svc.cluster.local/status
+          kubectl -n default run curl-fernie --image=curlimages/curl:8.11.1 --restart=Never --rm -i \
+            --command -- curl -sf --max-time 5 http://fernie.k8s-buddy-plants.svc.cluster.local/status
 
       # Asserts the count, not just that the command exits 0: `kubectl get`
       # against a selector that matches nothing still exits 0 and merely
@@ -474,37 +566,47 @@ jobs:
       # would pass vacuously if the label selector ever stopped matching,
       # which would make the "after" wait loop below see remaining=0 on its
       # very first iteration and report a false GC pass having proven
-      # nothing at all. Failing loudly here if the count isn't exactly 5 is
+      # nothing at all. Failing loudly here if the count isn't exactly 6 is
       # what keeps the flagship assertion below honest.
+      #
+      # SIX, not five: the NetworkPolicy is the sixth owned child, added so
+      # a Plant's pods get the same default-deny posture Plan 1's static
+      # NetworkPolicies give buddy-api.
       - name: Children exist before deletion (the "before" half of the GC proof)
         run: |
           set -euo pipefail
-          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie
-          before="$(kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie --no-headers | wc -l)"
-          if [ "$before" -ne 5 ]; then
-            echo "expected exactly 5 children before delete, saw $before -- the GC proof below would be meaningless" >&2
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie
+          before="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie --no-headers | wc -l)"
+          if [ "$before" -ne 6 ]; then
+            echo "expected exactly 6 children before delete, saw $before -- the GC proof below would be meaningless" >&2
             exit 1
           fi
-          echo "confirmed: 5 children present before delete"
+          echo "confirmed: 6 children present before delete"
 
       # THE GARBAGE COLLECTION PROOF. This is what envtest structurally
       # cannot show (no garbage-collector controller runs there) and the
-      # reason Task 5 exists as a live-cluster task at all.
-      - name: Delete the Plant and assert all five children are garbage-collected
+      # reason a live-cluster e2e job exists at all.
+      #
+      # The Plant now carries NO finalizer (see ADR 0007), so the delete
+      # below completes on the API server's own terms rather than waiting for
+      # the operator to unblock it. The children still go away, because they
+      # always went away for the same reason: owner references, walked by the
+      # garbage collector. That is exactly the point of removing it.
+      - name: Delete the Plant and assert all six children are garbage-collected
         run: |
           set -euo pipefail
-          kubectl delete plant fernie --wait=true --timeout=60s
+          kubectl -n k8s-buddy-plants delete plant fernie --wait=true --timeout=60s
           for i in $(seq 1 30); do
-            remaining="$(kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie --no-headers 2>/dev/null | wc -l)"
+            remaining="$(kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie --no-headers 2>/dev/null | wc -l)"
             if [ "$remaining" -eq 0 ]; then
-              echo "all five children garbage-collected"
+              echo "all six children garbage-collected"
               exit 0
             fi
             echo "waiting for garbage collection: $remaining child object(s) remaining (attempt $i/30)"
             sleep 2
           done
           echo "one or more owned children survived Plant deletion:" >&2
-          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie >&2 || true
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie >&2 || true
           exit 1
 
       - name: RBAC is actually scoped (plant-operator must NOT be able to touch nodes or secrets)
@@ -546,9 +648,12 @@ jobs:
           echo "=== plant-operator events ==="
           kubectl -n k8s-buddy-system get events --sort-by=.lastTimestamp || true
           echo "=== fernie Plant ==="
-          kubectl get plant fernie -o yaml || true
-          kubectl describe plant fernie || true
+          kubectl -n k8s-buddy-plants get plant fernie -o yaml || true
+          kubectl -n k8s-buddy-plants describe plant fernie || true
           echo "=== fernie's owned children (if any remain) ==="
-          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie -o wide || true
-          echo "=== default namespace events ==="
-          kubectl get events -n default --sort-by=.lastTimestamp || true
+          kubectl -n k8s-buddy-plants get deploy,svc,cm,pdb,sa,netpol -l buddy.k8s-buddy.io/plant=fernie -o wide || true
+          echo "=== fernie's pods, with the ServiceAccount each actually runs as ==="
+          kubectl -n k8s-buddy-plants get pods -l buddy.k8s-buddy.io/plant=fernie \
+            -o custom-columns=NAME:.metadata.name,SA:.spec.serviceAccountName,STATUS:.status.phase || true
+          echo "=== k8s-buddy-plants events (PSA rejections show up here) ==="
+          kubectl get events -n k8s-buddy-plants --sort-by=.lastTimestamp || true

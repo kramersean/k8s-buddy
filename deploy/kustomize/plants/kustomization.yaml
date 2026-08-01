@@ -1,0 +1,13 @@
+# The namespace Plants live in, and nothing else.
+#
+# The Plant samples themselves stay in config/samples/ (kubebuilder's own
+# convention, and where `make demo-operator` and CI both read them from)
+# rather than being pulled in here: a kustomization that created the
+# namespace AND two Plants would make `kubectl delete -k` take the namespace
+# down with them, and would make this directory the third place a reviewer
+# has to look for "what does a Plant look like".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml

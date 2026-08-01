@@ -1,0 +1,44 @@
+# Namespace k8s-buddy-plants: where Plants live.
+#
+# Plan 1's static workload gets Pod Security Admission's `restricted`
+# profile from deploy/kustomize/base/namespace.yaml, and a default-deny
+# NetworkPolicy from deploy/kustomize/base/networkpolicy.yaml. The project's
+# own spec says that posture applies "to every workload without exception" --
+# but a Plant applied with no namespace lands in `default`, which has neither,
+# so operator-managed Pods were strictly LESS constrained than the static ones
+# they were supposed to supersede.
+#
+# This namespace closes half of that gap; the operator itself closes the other
+# half, by generating a per-Plant NetworkPolicy as its sixth owned child (see
+# NetworkPolicyFor in internal/controller/resources.go). The split is
+# deliberate: a namespace is not a per-Plant object, so it cannot be owned by
+# a Plant and garbage-collected with one, while a NetworkPolicy scoped to a
+# single Plant's pods can be and is.
+#
+# The four PSA labels are copied verbatim from base/namespace.yaml, including
+# `enforce-version: latest` -- enforcement deliberately drifts forward with
+# the cluster's Kubernetes version rather than pinning to whatever version
+# this file was written against -- and `audit`/`warn` set to the same level so
+# a future change that would violate `restricted` shows up in the audit log
+# and as an apply-time warning before it is ever enforced against something
+# already running.
+#
+# `restricted` is what the generated pod spec is already built for:
+# runAsNonRoot, runAsUser 65532, seccompProfile RuntimeDefault at BOTH pod and
+# container scope, allowPrivilegeEscalation false, readOnlyRootFilesystem, and
+# all capabilities dropped. Admission under this profile is asserted in CI and
+# was verified against the live kind cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: k8s-buddy-plants
+    app.kubernetes.io/instance: k8s-buddy-plants
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
