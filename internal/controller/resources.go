@@ -23,6 +23,8 @@
 package controller
 
 import (
+	"strconv"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -423,11 +425,16 @@ func ServiceFor(p *buddyv1alpha1.Plant) *corev1.Service {
 
 // ConfigMapFor builds the non-secret runtime configuration the generated
 // Deployment consumes via envFrom: Plan 1's buddy-api-config defaults, with
-// BUDDY_NAME, BUDDY_SPECIES, and BUDDY_LATENCY_BUDGET filled in from p.
-// BUDDY_LATENCY_BUDGET is rendered with time.Duration's own String method
-// (e.g. "150ms"), the same format the field already carries as a
-// metav1.Duration. It is named exactly p.Name, in p.Namespace, and does not
-// set an owner reference — see DeploymentFor's comment for why.
+// BUDDY_NAME, BUDDY_SPECIES, BUDDY_LATENCY_BUDGET, and
+// BUDDY_ENABLE_CHAOS_ENDPOINTS filled in from p. BUDDY_LATENCY_BUDGET is
+// rendered with time.Duration's own String method (e.g. "150ms"), the same
+// format the field already carries as a metav1.Duration.
+// BUDDY_ENABLE_CHAOS_ENDPOINTS is rendered from p.Spec.Chaos.EnableEndpoints
+// via strconv.FormatBool, so it is "false" for every Plant that leaves
+// spec.chaos unset (EnableEndpoints's own zero value, and its CRD default —
+// see ChaosSpec in api/v1alpha1/plant_types.go) and "true" only for a Plant
+// that opts in explicitly. It is named exactly p.Name, in p.Namespace, and
+// does not set an owner reference — see DeploymentFor's comment for why.
 //
 // BUDDY_PORT is deliberately absent, mirroring Plan 1's ConfigMap exactly.
 // The port is independently pinned in four other places in this file's
@@ -453,7 +460,7 @@ func ConfigMapFor(p *buddyv1alpha1.Plant) *corev1.ConfigMap {
 			"BUDDY_WORK_ERROR_RATE":        "0.05",
 			"BUDDY_WORK_MIN_DELAY":         "10ms",
 			"BUDDY_WORK_MAX_DELAY":         "200ms",
-			"BUDDY_ENABLE_CHAOS_ENDPOINTS": "false",
+			"BUDDY_ENABLE_CHAOS_ENDPOINTS": strconv.FormatBool(p.Spec.Chaos.EnableEndpoints),
 			"BUDDY_SHUTDOWN_DELAY":         "5s",
 		},
 	}

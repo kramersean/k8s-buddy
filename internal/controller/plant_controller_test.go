@@ -106,6 +106,79 @@ func TestReconcile_LiveDeploymentRunsAsPlantServiceAccount(t *testing.T) {
 		client.ObjectKey{Namespace: ns, Name: deployment.Spec.Template.Spec.ServiceAccountName}, serviceAccount))
 }
 
+// --- case 1c: the live ConfigMap actually carries the Chaos setting ------
+
+// TestReconcile_LiveConfigMapReflectsChaosEndpointsSetting asserts against
+// the child ConfigMap READ BACK FROM THE API SERVER, not against
+// ConfigMapFor's output -- the same discipline
+// TestReconcile_LiveDeploymentRunsAsPlantServiceAccount established for
+// ServiceAccountName, and for the same reason: resources_test.go's builder
+// assertions (TestConfigMapFor_ChaosEndpointsFollowsField) only prove
+// ConfigMapFor computes the right value in isolation. They cannot catch a
+// mutate function that computes the right desired ConfigMap but never
+// actually applies the field's change to an already-existing live object --
+// exactly the class of bug mutateDeployment had with ServiceAccountName,
+// which stayed invisible for two tasks because only the builder was ever
+// asserted against. Only reading the live child, both at creation and after
+// a spec update, can catch that here too.
+func TestReconcile_LiveConfigMapReflectsChaosEndpointsSetting(t *testing.T) {
+	tests := []struct {
+		name            string
+		enableEndpoints bool
+		want            string
+	}{
+		{name: "disabled by default", enableEndpoints: false, want: "false"},
+		{name: "explicitly enabled", enableEndpoints: true, want: "true"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ns := newTestNamespace(t)
+			plant := newTestPlant(ns, "fernie", 3)
+			plant.Spec.Chaos.EnableEndpoints = tc.enableEndpoints
+			createPlant(t, plant)
+
+			waitForChildrenExist(t, plant)
+
+			configMap := &corev1.ConfigMap{}
+			require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, configMap))
+			require.Equal(t, tc.want, configMap.Data["BUDDY_ENABLE_CHAOS_ENDPOINTS"],
+				"the live ConfigMap must carry BUDDY_ENABLE_CHAOS_ENDPOINTS=%s for spec.chaos.enableEndpoints=%t",
+				tc.want, tc.enableEndpoints)
+		})
+	}
+}
+
+// TestReconcile_ChaosEndpointsUpdatePropagates proves the same thing across
+// a SPEC UPDATE, not just at creation: flipping spec.chaos.enableEndpoints
+// on an existing Plant must reach the live ConfigMap on the next reconcile,
+// the same way TestReconcile_ReplicasUpdatePropagates and
+// TestReconcile_ResourceProfileUpdatePropagates prove for their own fields.
+func TestReconcile_ChaosEndpointsUpdatePropagates(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "fernie", 3) // starts with chaos disabled
+	createPlant(t, plant)
+
+	waitForChildrenExist(t, plant)
+
+	key := client.ObjectKey{Namespace: ns, Name: "fernie"}
+	configMap := &corev1.ConfigMap{}
+	require.NoError(t, testClient.Get(testCtx, key, configMap))
+	require.Equal(t, "false", configMap.Data["BUDDY_ENABLE_CHAOS_ENDPOINTS"])
+
+	updatePlant(t, client.ObjectKeyFromObject(plant), func(p *buddyv1alpha1.Plant) {
+		p.Spec.Chaos.EnableEndpoints = true
+	})
+
+	require.Eventually(t, func() bool {
+		cm := &corev1.ConfigMap{}
+		if err := testClient.Get(testCtx, key, cm); err != nil {
+			return false
+		}
+		return cm.Data["BUDDY_ENABLE_CHAOS_ENDPOINTS"] == "true"
+	}, 10*time.Second, 100*time.Millisecond, "live ConfigMap's BUDDY_ENABLE_CHAOS_ENDPOINTS never updated to true")
+}
+
 // --- case 2: NO finalizer is ever added ---------------------------------
 
 // TestReconcile_AddsNoFinalizer is the inverse of the test it replaces.

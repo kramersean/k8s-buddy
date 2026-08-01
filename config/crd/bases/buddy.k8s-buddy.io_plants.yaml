@@ -68,6 +68,19 @@ spec:
           spec:
             description: Spec is the desired state of the plant, as set by its owner.
             properties:
+              chaos:
+                description: Chaos configures optional chaos-injection affordances
+                  for this Plant.
+                properties:
+                  enableEndpoints:
+                    default: false
+                    description: |-
+                      EnableEndpoints exposes POST /chaos/readiness on this Plant's pods so
+                      chaos-buddy's readiness-flap mode can reach them. Defaults to false:
+                      a chaos endpoint reachable in an ordinary deployment is a security
+                      finding, so it is opt-in per Plant rather than on by default.
+                    type: boolean
+                type: object
               image:
                 default: ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev
                 description: |-

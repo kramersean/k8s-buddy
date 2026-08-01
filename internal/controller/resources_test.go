@@ -219,6 +219,27 @@ func TestConfigMapFor(t *testing.T) {
 	require.False(t, ok, "ConfigMap must not carry BUDDY_PORT")
 }
 
+// TestConfigMapFor_ChaosEndpointsFollowsField asserts
+// BUDDY_ENABLE_CHAOS_ENDPOINTS tracks p.Spec.Chaos.EnableEndpoints in BOTH
+// states, not just the false default TestConfigMapFor already checks. A
+// Plant that leaves spec.chaos unset (testPlant()'s own zero value) must
+// still render "false" -- the CRD's own +kubebuilder:default=false on
+// ChaosSpec.EnableEndpoints only fills in the field through API-server
+// defaulting, so a hand-built Plant that bypasses admission (every test in
+// this file) must get the same safe answer from the builder itself.
+func TestConfigMapFor_ChaosEndpointsFollowsField(t *testing.T) {
+	t.Parallel()
+
+	disabled := testPlant()
+	require.Equal(t, "false", controller.ConfigMapFor(disabled).Data["BUDDY_ENABLE_CHAOS_ENDPOINTS"],
+		"a Plant that leaves spec.chaos unset must render BUDDY_ENABLE_CHAOS_ENDPOINTS=false")
+
+	enabled := testPlant()
+	enabled.Spec.Chaos.EnableEndpoints = true
+	require.Equal(t, "true", controller.ConfigMapFor(enabled).Data["BUDDY_ENABLE_CHAOS_ENDPOINTS"],
+		"a Plant with spec.chaos.enableEndpoints=true must render BUDDY_ENABLE_CHAOS_ENDPOINTS=true")
+}
+
 func TestDeploymentFor(t *testing.T) {
 	t.Parallel()
 
@@ -411,6 +432,16 @@ func TestDeterminism(t *testing.T) {
 	require.Equal(t, controller.NetworkPolicyFor(p), controller.NetworkPolicyFor(p))
 	require.Equal(t, controller.LabelsFor(p), controller.LabelsFor(p))
 	require.Equal(t, controller.SelectorFor(p), controller.SelectorFor(p))
+
+	// Same check again with spec.chaos.enableEndpoints set: ChaosSpec is a
+	// new field on PlantSpec, and ConfigMapFor is the one builder whose
+	// output actually varies with it (see
+	// TestConfigMapFor_ChaosEndpointsFollowsField) -- so it is the one
+	// builder this determinism guard would fail to protect if it only ever
+	// exercised the zero-valued Chaos field above.
+	chaosEnabled := testPlant()
+	chaosEnabled.Spec.Chaos.EnableEndpoints = true
+	require.Equal(t, controller.ConfigMapFor(chaosEnabled), controller.ConfigMapFor(chaosEnabled))
 }
 
 // TestNetworkPolicyFor is the sixth child. Plan 1's static path gets Pod

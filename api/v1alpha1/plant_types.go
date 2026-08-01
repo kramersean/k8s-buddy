@@ -90,6 +90,20 @@ type PlantSpec struct {
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:default="150ms"
 	LatencyBudget metav1.Duration `json:"latencyBudget,omitempty"`
+
+	// Chaos configures optional chaos-injection affordances for this Plant.
+	// +optional
+	Chaos ChaosSpec `json:"chaos,omitempty"`
+}
+
+// ChaosSpec controls whether this Plant exposes chaos-injection endpoints.
+type ChaosSpec struct {
+	// EnableEndpoints exposes POST /chaos/readiness on this Plant's pods so
+	// chaos-buddy's readiness-flap mode can reach them. Defaults to false:
+	// a chaos endpoint reachable in an ordinary deployment is a security
+	// finding, so it is opt-in per Plant rather than on by default.
+	// +kubebuilder:default=false
+	EnableEndpoints bool `json:"enableEndpoints,omitempty"`
 }
 
 // PlantStatus is the observed state of a Plant, computed by the operator on
