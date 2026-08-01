@@ -184,12 +184,13 @@ func main() {
 	cfg := ctrl.GetConfigOrDie()
 
 	dnsNames := webhookServiceDNSNames(webhookServiceName, podNamespace)
-	caPEM, err := generateWebhookServingCertificate(webhookCertDir, dnsNames)
+	caPEM, leafNotAfter, err := generateWebhookServingCertificate(webhookCertDir, dnsNames)
 	if err != nil {
 		setupLog.Error(err, "unable to generate webhook serving certificate")
 		os.Exit(1)
 	}
-	setupLog.Info("generated self-signed webhook serving certificate", "dnsNames", dnsNames, "certDir", webhookCertDir)
+	setupLog.Info("generated self-signed webhook serving certificate",
+		"dnsNames", dnsNames, "certDir", webhookCertDir, "notAfter", leafNotAfter.Format(time.RFC3339))
 
 	patchCtx, patchCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	err = patchWebhookCABundles(patchCtx, cfg, scheme, mutatingWebhookConfigurationName, validatingWebhookConfigurationName, caPEM)
@@ -200,7 +201,7 @@ func main() {
 			"validatingWebhookConfigurationName", validatingWebhookConfigurationName)
 		os.Exit(1)
 	}
-	setupLog.Info("patched CA bundle onto both webhook configurations",
+	setupLog.Info("merged this process's CA into both webhook configurations' caBundle",
 		"mutatingWebhookConfigurationName", mutatingWebhookConfigurationName,
 		"validatingWebhookConfigurationName", validatingWebhookConfigurationName)
 
@@ -282,6 +283,19 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+	// The certificate-expiry backstop (see webhookCertificateValidity and
+	// webhookCertExpiryCheck's own comments, webhookcerts.go): registered on
+	// BOTH checks so a liveness-probe failure actually restarts this
+	// container (minting a fresh certificate) and a readiness-probe failure
+	// pulls it out of the webhook Service's endpoints as early as possible.
+	if err := mgr.AddHealthzCheck("webhook-cert-expiry", webhookCertExpiryCheck(leafNotAfter)); err != nil {
+		setupLog.Error(err, "unable to set up webhook certificate expiry health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("webhook-cert-expiry", webhookCertExpiryCheck(leafNotAfter)); err != nil {
+		setupLog.Error(err, "unable to set up webhook certificate expiry ready check")
 		os.Exit(1)
 	}
 

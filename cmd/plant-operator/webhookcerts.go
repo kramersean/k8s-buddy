@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,42 +36,67 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
-// webhookCertificateValidity is deliberately short: this certificate is
-// regenerated at every process start (a restart, a rollout, a rescheduled
-// pod) and the caBundle is re-patched to match every time, so there is no
-// scenario where a long-lived cert is needed to survive between
-// regenerations the way a cert-manager-issued one would need to. A short
-// validity window bounds how stale an un-patched caBundle could ever make a
-// running pod's cert look, without buying anything in exchange.
-const webhookCertificateValidity = 24 * time.Hour
+// webhookCertificateValidity is deliberately LONG -- 10 years, far beyond
+// any realistic lifetime for a container on this project's kind cluster --
+// even though the certificate is regenerated at every process start anyway
+// (a restart, a rollout, a rescheduled pod) and gains nothing from being
+// individually long-lived in the ordinary case. A short validity was tried
+// first and rejected: nothing in this process ever proactively regenerates
+// the certificate before it is used again, so a short-lived cert on a pod
+// that simply stays up (a kind demo cluster left running over a weekend is
+// the concrete, not hypothetical, case) eventually serves an EXPIRED leaf.
+// The API server's own TLS verification then fails, and with the validating
+// webhook's failurePolicy: Fail, every Plant CREATE/UPDATE starts failing --
+// silently, with no restart, no log line from this process (it is not the
+// one rejecting the request), and no automatic recovery, until someone
+// happens to notice and manually bounces the pod.
+//
+// A 10-year certificate turns "will this expire while the pod is up" from a
+// real, timer-driven failure mode into one that is only theoretically
+// possible -- and webhookCertExpiryCheck below is the backstop for even
+// that: it reports this process unhealthy well before NotAfter, so the
+// kubelet restarts it (minting a fresh certificate) rather than ever
+// actually serving an expired one.
+const webhookCertificateValidity = 87600 * time.Hour // 10 years
+
+// webhookCertExpiryReadinessMargin is how long before the generated serving
+// certificate's actual NotAfter this process starts reporting itself
+// unhealthy on both /healthz and /readyz (see webhookCertExpiryCheck).
+// Given webhookCertificateValidity's 10-year window, this should never
+// realistically fire during this project's lifetime -- it exists purely as
+// a backstop against the failure mode webhookCertificateValidity's own
+// comment describes, not as a mechanism this project expects to exercise.
+const webhookCertExpiryReadinessMargin = 24 * time.Hour
 
 // generateWebhookServingCertificate creates a fresh, self-signed CA and a
 // leaf serving certificate signed by it (valid for dnsNames), writes the
 // leaf's cert+key to certDir as tls.crt/tls.key -- the exact filenames
 // controller-runtime's webhook.Server (CertDir option) expects -- and
-// returns the CA certificate's own PEM bytes, which the caller patches into
-// both webhook configurations' caBundle so the API server trusts the leaf
-// this CA just signed.
+// returns the CA certificate's own PEM bytes (which the caller merges into
+// both webhook configurations' caBundle, see mergeCABundle, so the API
+// server trusts the leaf this CA just signed) and the leaf certificate's own
+// NotAfter, which the caller wires into webhookCertExpiryCheck.
 //
 // ECDSA P-256 rather than RSA: this keypair is regenerated on every process
 // start and thrown away on every restart, so there is no long-term key
 // storage to justify RSA's larger, slower keys -- P-256 is the same curve
 // controller-runtime's own certwatcher tests use, and is fast enough to
 // generate on every pod start without measurable startup delay.
-func generateWebhookServingCertificate(certDir string, dnsNames []string) (caPEM []byte, err error) {
+func generateWebhookServingCertificate(certDir string, dnsNames []string) (caPEM []byte, leafNotAfter time.Time, err error) {
 	if len(dnsNames) == 0 {
-		return nil, fmt.Errorf("generateWebhookServingCertificate: no DNS names given")
+		return nil, time.Time{}, fmt.Errorf("generateWebhookServingCertificate: no DNS names given")
 	}
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generating CA key: %w", err)
+		return nil, time.Time{}, fmt.Errorf("generating CA key: %w", err)
 	}
 	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, fmt.Errorf("generating CA serial number: %w", err)
+		return nil, time.Time{}, fmt.Errorf("generating CA serial number: %w", err)
 	}
 	now := time.Now()
 	caTemplate := &x509.Certificate{
@@ -84,21 +110,21 @@ func generateWebhookServingCertificate(certDir string, dnsNames []string) (caPEM
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
 	if err != nil {
-		return nil, fmt.Errorf("self-signing CA certificate: %w", err)
+		return nil, time.Time{}, fmt.Errorf("self-signing CA certificate: %w", err)
 	}
 	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
 	caCert, err := x509.ParseCertificate(caDER)
 	if err != nil {
-		return nil, fmt.Errorf("parsing freshly-created CA certificate: %w", err)
+		return nil, time.Time{}, fmt.Errorf("parsing freshly-created CA certificate: %w", err)
 	}
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generating serving key: %w", err)
+		return nil, time.Time{}, fmt.Errorf("generating serving key: %w", err)
 	}
 	leafSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, fmt.Errorf("generating serving certificate serial number: %w", err)
+		return nil, time.Time{}, fmt.Errorf("generating serving certificate serial number: %w", err)
 	}
 	leafTemplate := &x509.Certificate{
 		SerialNumber: leafSerial,
@@ -116,29 +142,29 @@ func generateWebhookServingCertificate(certDir string, dnsNames []string) (caPEM
 
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &leafKey.PublicKey, caKey)
 	if err != nil {
-		return nil, fmt.Errorf("signing serving certificate: %w", err)
+		return nil, time.Time{}, fmt.Errorf("signing serving certificate: %w", err)
 	}
 	leafCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
 	leafKeyDER, err := x509.MarshalECPrivateKey(leafKey)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling serving key: %w", err)
+		return nil, time.Time{}, fmt.Errorf("marshaling serving key: %w", err)
 	}
 	leafKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: leafKeyDER})
 
 	if err := os.MkdirAll(certDir, 0o750); err != nil {
-		return nil, fmt.Errorf("creating cert dir %s: %w", certDir, err)
+		return nil, time.Time{}, fmt.Errorf("creating cert dir %s: %w", certDir, err)
 	}
 	// 0o600: private key material, readable only by the process that just
 	// wrote it (uid 65532, this container's own non-root user -- see
 	// deploy/kustomize/operator/deployment.yaml's securityContext).
 	if err := os.WriteFile(filepath.Join(certDir, "tls.crt"), leafCertPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("writing tls.crt: %w", err)
+		return nil, time.Time{}, fmt.Errorf("writing tls.crt: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(certDir, "tls.key"), leafKeyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("writing tls.key: %w", err)
+		return nil, time.Time{}, fmt.Errorf("writing tls.key: %w", err)
 	}
 
-	return caCertPEM, nil
+	return caCertPEM, leafTemplate.NotAfter, nil
 }
 
 // webhookServiceDNSNames returns the DNS names a serving certificate for
@@ -156,10 +182,107 @@ func webhookServiceDNSNames(serviceName, namespace string) []string {
 	}
 }
 
+// mergeCABundle folds newCAPEM into existing (a webhook's current
+// clientConfig.caBundle, zero or more concatenated PEM CERTIFICATE blocks)
+// by APPENDING rather than overwriting: every still-valid certificate
+// already in existing is kept, newCAPEM's own certificate is added, and
+// anything already expired is pruned. Malformed or non-certificate PEM
+// blocks are skipped rather than failing the whole patch -- a defensively
+// tolerant read of a field only this process's own previous generations
+// have ever written.
+//
+// This is what makes both a rolling update AND running more than one
+// replica safe, neither of which a plain overwrite would be:
+//
+//   - Rolling update: the new Pod's Default() -- via cmd/plant-operator's
+//     own certificate bootstrap -- patches its own, brand-new CA into the
+//     caBundle BEFORE it is marked Ready, while the OLD Pod is still the
+//     Service's only endpoint and is still presenting the OLD leaf
+//     certificate. Overwriting here would mean the API server stops
+//     trusting the old (still-serving) certificate the instant the new
+//     Pod's caBundle patch lands, well before traffic ever reaches the new
+//     Pod -- every Plant write fails x509 verification for the whole
+//     readiness window. Appending keeps the old CA in the bundle
+//     throughout, so the still-serving old Pod stays trusted right up until
+//     it stops serving.
+//   - Multiple replicas: with no leader election gating the webhook server
+//     (every replica serves admission traffic, not just the leader), each
+//     replica generates and trusts only its OWN CA. An overwrite would mean
+//     only the last replica to patch ends up trusted at all -- the API
+//     server's Service-level load balancing has no idea which replica
+//     issued which certificate, so roughly (n-1)/n of calls would fail TLS
+//     verification against whichever replica isn't the most recent writer.
+//     Appending means the caBundle accumulates every currently-running
+//     replica's CA, and any of them can be dialed successfully.
+//
+// Certificates are never proactively removed once trusted except by
+// expiring (webhookCertificateValidity is 10 years, so in practice this
+// bundle only ever grows across this project's lifetime -- an acceptable
+// trade for a demo-scale operator that is restarted at most a handful of
+// times, not a production fleet restarting thousands of times a day).
+func mergeCABundle(existing, newCAPEM []byte) []byte {
+	now := time.Now()
+	seen := make(map[string]bool)
+	var merged []byte
+
+	keepValid := func(pemBytes []byte) {
+		rest := pemBytes
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				return
+			}
+			if block.Type != "CERTIFICATE" {
+				continue
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				continue // skip: not a certificate this code can reason about, but not fatal to the patch
+			}
+			if !cert.NotAfter.After(now) {
+				continue // pruned: already expired
+			}
+			key := string(block.Bytes)
+			if seen[key] {
+				continue // already present (e.g. this exact CA survived from a previous merge)
+			}
+			seen[key] = true
+			merged = append(merged, pem.EncodeToMemory(block)...)
+		}
+	}
+
+	keepValid(existing)
+	keepValid(newCAPEM)
+	return merged
+}
+
+// webhookCertExpiryCheck returns a healthz.Checker reporting unhealthy once
+// leafNotAfter is within webhookCertExpiryReadinessMargin -- registered on
+// BOTH /healthz (so a failing liveness probe actually restarts the
+// container, minting a fresh certificate) and /readyz (so the Pod is pulled
+// out of the webhook Service's endpoints as early as possible, before the
+// liveness probe's own failureThreshold*periodSeconds finally triggers the
+// restart). See webhookCertificateValidity's own comment for why this
+// should never realistically fire in this project's lifetime; it exists as
+// the backstop for the case that it does.
+func webhookCertExpiryCheck(leafNotAfter time.Time) healthz.Checker {
+	return func(_ *http.Request) error {
+		if !time.Now().Add(webhookCertExpiryReadinessMargin).Before(leafNotAfter) {
+			return fmt.Errorf(
+				"webhook serving certificate expires at %s, within the %s safety margin -- a restart is required to mint a fresh one",
+				leafNotAfter.Format(time.RFC3339), webhookCertExpiryReadinessMargin)
+		}
+		return nil
+	}
+}
+
 // patchWebhookCABundles GETs the named MutatingWebhookConfiguration and
-// ValidatingWebhookConfiguration, sets every webhook entry's
-// clientConfig.caBundle to caPEM, and writes each back with Update -- using
-// a direct (uncached) client built straight from cfg, since this runs once
+// ValidatingWebhookConfiguration, MERGES caPEM into every webhook entry's
+// clientConfig.caBundle (see mergeCABundle -- this appends and prunes
+// expired entries, it never simply overwrites), and writes each back with
+// Update -- using a direct (uncached) client built straight from cfg, since
+// this runs once
 // at startup before the manager's cache has synced (or, for a manager that
 // never watches these cluster-scoped types at all, ever would). Both
 // objects must already exist (created by `make manifests` +
@@ -202,7 +325,7 @@ func patchOneWebhookCABundle(ctx context.Context, c client.Client, backoff wait.
 				return retryableGetError(err, kind, name)
 			}
 			for i := range obj.Webhooks {
-				obj.Webhooks[i].ClientConfig.CABundle = caPEM
+				obj.Webhooks[i].ClientConfig.CABundle = mergeCABundle(obj.Webhooks[i].ClientConfig.CABundle, caPEM)
 			}
 			updateErr = c.Update(ctx, obj)
 		} else {
@@ -211,7 +334,7 @@ func patchOneWebhookCABundle(ctx context.Context, c client.Client, backoff wait.
 				return retryableGetError(err, kind, name)
 			}
 			for i := range obj.Webhooks {
-				obj.Webhooks[i].ClientConfig.CABundle = caPEM
+				obj.Webhooks[i].ClientConfig.CABundle = mergeCABundle(obj.Webhooks[i].ClientConfig.CABundle, caPEM)
 			}
 			updateErr = c.Update(ctx, obj)
 		}
