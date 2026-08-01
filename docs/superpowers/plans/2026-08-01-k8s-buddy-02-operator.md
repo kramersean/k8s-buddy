@@ -400,6 +400,13 @@ all pass; report the run time (a suite over ~60s is too slow — tune the pollin
   assertions to cover it. The workload still gets zero API access — naming the
   account explicitly is the point, so the manifest states its posture rather than
   inheriting `default`.
+- **CI must run the envtest suite.** Task 4 gated it behind a `//go:build envtest`
+  tag so plain `make test` stays fast and dependency-free — correct for local
+  iteration, but it means the repository's highest-signal tests do not currently
+  run anywhere automatically. Wire `make test-envtest` into the CI `test` job on
+  `ubuntu-latest` (which has a C toolchain and no Windows process-teardown
+  problem), including the `setup-envtest` asset download step. A controller suite
+  that only runs when someone remembers to type a build tag is decorative.
 - CI: extend the existing e2e job — after the Plan 1 demo passes, install the CRD,
   deploy the operator, apply the `fernie` sample, wait for
   `status.readyReplicas == spec.replicas`, assert `kubectl get plants` shows a mood,
