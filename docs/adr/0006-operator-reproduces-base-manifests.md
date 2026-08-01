@@ -13,8 +13,10 @@ K8s Buddy now describes the same buddy-api workload twice.
   NetworkPolicies. This is what `make demo` applies.
 - `internal/controller/resources.go` — pure Go builders producing a Deployment,
   Service, ConfigMap, PodDisruptionBudget, ServiceAccount, and NetworkPolicy for
-  a `Plant`. This is what `make demo-operator` applies, indirectly, by creating a
-  Plant and letting the operator reconcile it.
+  a `Plant`, plus a seventh, conditional ServiceMonitor (added in Plan 3 Task 2;
+  see ADR 0008) created only when the Prometheus Operator's CRD is present. This
+  is what `make demo-operator` applies, indirectly, by creating a Plant and
+  letting the operator reconcile it.
 
 The two agree today on every value that matters: the same pod and container
 security contexts, the same three probes with the same cadences, the same
@@ -66,7 +68,7 @@ than excluded from comparison:
 | `serviceAccountName: buddy-api` vs the Plant's name | Each Plant gets its own identity. What must *not* differ — and is asserted — is that the field is set at all. |
 | Untagged image vs `spec.image` | The static manifest's tag comes from the kustomization's `images:` transformer, which `make deploy` overrides with an immutable git SHA. |
 | A second NodePort Service, static only | A nodePort is a cluster-wide singleton. Every Plant creating one at 30080 would mean the second Plant on a cluster never gets a Service. |
-| PDB named `-pdb` in the operator | Five of the six children take the Plant's bare name; suffixing keeps one uniform naming rule instead of one that depends on which kinds happen to collide. |
+| PDB named `-pdb` in the operator | Six of the seven children take the Plant's bare name; suffixing keeps one uniform naming rule instead of one that depends on which kinds happen to collide. |
 | 3 namespace-wide NetworkPolicies vs 1 Plant-scoped one | `podSelector: {}` is a claim over every pod in the namespace. Two Plants sharing a namespace would each own an identical object and fight over it forever, and deleting either would remove the other's default-deny. A NetworkPolicy is deny-by-default for every pod it selects, so scoping to the Plant costs nothing. |
 | Probes: `timeoutSeconds` / `successThreshold` / `scheme` set in Go, omitted in YAML | The reconciler diffs the builder's output against the live object every pass. A field left unset in Go would never equal the server's defaulted value, producing a permanent phantom diff and a write on every reconcile. |
 

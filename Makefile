@@ -671,7 +671,7 @@ demo-operator: kind-up docker-build kind-load deploy-operator ## Demo B -- Plant
 	@echo
 	kubectl -n $(PLANT_NAMESPACE) get plants
 	@echo
-	@echo "The six children this Plant owns:"
+	@echo "This Plant's six unconditionally-owned children (a seventh, ServiceMonitor, appears too once the Prometheus Operator CRD is installed):"
 	kubectl -n $(PLANT_NAMESPACE) get deploy,svc,cm,pdb,sa,netpol -l $(PLANT_LABEL)=$(PLANT_NAME)
 
 .PHONY: undeploy-plants
