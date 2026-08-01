@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
+	"github.com/sean-kramer/k8s-buddy/internal/mood"
 )
 
 // --- case 1: creation owns all six children -----------------------------
@@ -347,6 +348,14 @@ func TestReconcile_AddsNoFinalizer(t *testing.T) {
 // the operator plan specifies verbatim, so a test that only ever compares
 // against the source constants would keep passing even if those constants'
 // VALUES silently drifted.
+//
+// This is also the envtest proof for the wilting-reachability fix
+// (status.go's moodFor, and internal/controller/status_test.go's own
+// TestMoodFor_ZeroReadyReportsWilting for the pure-function version of the
+// same assertion): status.Mood is read back from the actual object a real
+// API server returned, not computed by calling moodFor directly, so this is
+// what would have caught the bug even if a future refactor moved the
+// ready==0 special case somewhere computeStatus stopped reaching.
 func TestReconcile_StatusReflectsNotReadyWithNoKubelet(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 4)
@@ -356,6 +365,9 @@ func TestReconcile_StatusReflectsNotReadyWithNoKubelet(t *testing.T) {
 
 	require.EqualValues(t, 4, got.Status.DesiredReplicas)
 	require.EqualValues(t, 0, got.Status.ReadyReplicas)
+	require.Equal(t, string(mood.MoodWilting), got.Status.Mood,
+		"a live Plant with zero ready replicas (and replicas desired) must report wilting -- "+
+			"see status.go's own moodFor comment for the bug this guards against")
 
 	conditions := conditionsByType(got.Status.Conditions)
 	ready, ok := conditions["Ready"]

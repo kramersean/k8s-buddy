@@ -144,7 +144,43 @@ func healthPercent(ready, desired int32) int32 {
 // latency component of Score always awards full marks; the mood ends up
 // driven entirely by readiness and the derived error rate, which is the
 // only signal computeStatus has available from a Deployment's status.
+//
+// One case is special-cased BEFORE the score ever runs: ready == 0 with
+// desired > 0 -- a Plant with zero ready replicas -- always reports
+// mood.MoodWilting directly, never derived from Score. This is not a
+// workaround, it is the correct fix for a real bug: internal/mood's rule
+// that a non-positive LatencyBudget means "no budget configured, award full
+// latency marks" is the right behavior for its actual owner, buddy-api,
+// which has a real P95 latency signal and a real budget most of the time --
+// a Plant with LatencyBudget genuinely unset should not be penalized for
+// data it was never asked to report. But this package has NO latency signal
+// at all, ever (P95Latency and LatencyBudget are both left at their zero
+// value above, unconditionally), so that same "no data, award full marks"
+// rule hands 30 of the ladder's 100 points to every Plant regardless of
+// health -- worth nothing when ready > 0 (where the other two components
+// already carry it into leafy/sprouting/thirsty/lost-a-leaf territory
+// correctly), but decisive at zero readiness: a fully-down Plant (errorRate
+// == 1, Ready == false) scores errorComponent=0 + latencyComponent=30 +
+// readinessComponent=0 == 30, landing in mood.MoodNotTooHot ("I'm not
+// feeling too hot") rather than mood.MoodWilting ("I'm wilting. Send
+// help.") -- and 30 is also comfortably under Score's own notReadyCeiling
+// (35), so that safety cap never brings it back down either. The result: a
+// completely dead Plant was structurally unable to ever report
+// mood.MoodWilting, the ladder's own most severe state, through the
+// operator. Special-casing total unavailability here fixes the wrong
+// answer at its source (this package fabricating latency data it does not
+// have) without touching internal/mood's own rule, which remains correct
+// for the consumer it was written for.
+//
+// desired == 0 (a deliberately scaled-to-zero Plant, e.g. `kubectl scale
+// plant fernie --replicas=0`) is explicitly NOT this case: ready == 0 with
+// NOTHING desired is not a sick plant, it is an idle one, and falls through
+// to the ordinary Score-based path exactly as before.
 func moodFor(ready, desired int32) mood.Mood {
+	if desired > 0 && ready == 0 {
+		return mood.MoodWilting
+	}
+
 	errorRate := 0.0
 	if desired > 0 {
 		errorRate = 1 - float64(ready)/float64(desired)
