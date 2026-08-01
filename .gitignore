@@ -1,6 +1,10 @@
 # Binaries
 bin/
 dist/
+
+# Generated build scratch (e.g. the image-pinning kustomize overlay
+# `make deploy` renders)
+.build/
 *.exe
 *.dll
 *.so

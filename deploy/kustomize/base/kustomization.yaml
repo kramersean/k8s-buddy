@@ -12,6 +12,29 @@ resources:
   - pdb.yaml
   - networkpolicy.yaml
 
+# deployment.yaml carries the image REPOSITORY only; the tag is supplied
+# here so it can be overridden per-deploy without editing a tracked
+# manifest. `make deploy` generates a thin overlay that restates this
+# block with newTag set to the immutable short git SHA of the image it
+# just built.
+#
+# The `dev` default is what a bare `kubectl apply -k deploy/kustomize/base`
+# gets, and it matches the second tag `make docker-build`/`make kind-load`
+# produce, so the base alone is still directly appliable. It is a mutable
+# tag, though, which is exactly why `make deploy` does not use it: applying
+# a mutable tag after a rebuild produces a byte-identical PodSpec, so the
+# Deployment's pod template hash never changes, no rollout is triggered,
+# and the cluster silently keeps serving the old image. That is not
+# hypothetical -- it is how this cluster ended up four commits stale
+# through two "successful" demo runs. With imagePullPolicy: IfNotPresent
+# it is worse than a no-op: any pod recreated later (eviction, node
+# restart, chaos) picks up whatever the reloaded tag now points at while
+# its peers keep the old image, producing a version-skewed Deployment with
+# no visible signal that anything is wrong.
+images:
+  - name: ghcr.io/sean-kramer/k8s-buddy/buddy-api
+    newTag: dev
+
 # app.kubernetes.io/part-of and app.kubernetes.io/managed-by are already set
 # explicitly on every object (Global Constraints requires all five standard
 # labels on every object, and kustomize's `labels` only applies uniformly),

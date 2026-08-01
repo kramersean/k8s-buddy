@@ -53,30 +53,20 @@ spec:
               app.kubernetes.io/name: buddy-api
               app.kubernetes.io/instance: k8s-buddy
               app.kubernetes.io/component: api
-      # buddy-api's own in-process shutdown sequence (cmd/buddy-api/main.go:
-      # gracefulShutdown) already does everything a preStop hook would
-      # normally buy: it flips readiness false the instant SIGTERM arrives,
-      # then sleeps BUDDY_SHUTDOWN_DELAY (5s default, see the ConfigMap) to
-      # let that readiness change propagate through Endpoints/EndpointSlice
-      # and every node's kube-proxy before it stops accepting connections.
-      #
-      # A `lifecycle.preStop` hook is deliberately NOT added here. The
-      # conventional `exec: ["sleep", "5"]` preStop cannot work in this
-      # image at all -- build/Dockerfile.buddy-api ships
-      # distroless/static-debian12:nonroot, which has no /bin/sh and no
-      # /bin/sleep to exec into; that preStop would fail every single
-      # termination (visible as a FailedPreStopHook event) rather than
-      # silently doing nothing. An httpGet-based preStop against /healthz
-      # would run, but it would be redundant: it wouldn't delay
-      # SIGTERM delivery any earlier or later than terminationGracePeriodSeconds
-      # already does, and the in-process delay below is what actually
-      # gates the shutdown sequence. terminationGracePeriodSeconds: 30
-      # gives the shutdown sequence (5s delay + up to 15s drain + margin)
-      # comfortable room before the kubelet SIGKILLs the process.
+      # No lifecycle.preStop hook: the endpoint-propagation delay runs
+      # in-process instead, because this distroless image has no shell for
+      # an exec hook to run in. See docs/adr/0002. 30s leaves room for the
+      # whole sequence (5s BUDDY_SHUTDOWN_DELAY + up to 15s drain +
+      # margin) before the kubelet SIGKILLs the process.
       terminationGracePeriodSeconds: 30
       containers:
         - name: buddy-api
-          image: ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev
+          # Untagged on purpose: the tag comes from the `images:`
+          # transformer in kustomization.yaml, which `make deploy`
+          # overrides with the immutable git SHA of the build being
+          # deployed. A mutable tag pinned here would make `kubectl apply
+          # -k` a silent no-op after every rebuild.
+          image: ghcr.io/sean-kramer/k8s-buddy/buddy-api
           # IfNotPresent, not Always: this image is loaded directly into
           # kind's node containerd via `make kind-load` and is never
           # pushed anywhere `ghcr.io/sean-kramer/k8s-buddy` could actually
