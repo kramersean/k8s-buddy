@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -54,12 +53,21 @@ func TestGracefulShutdown_OrderingAndDelay(t *testing.T) {
 	// is invoked -- before it waits for connections to drain -- so timing
 	// it directly proves *when* Shutdown was called, not just that the
 	// overall function eventually returned.
-	var mu sync.Mutex
-	var shutdownCalledAt time.Time
+	//
+	// The callback runs in its OWN goroutine (net/http starts it with
+	// `go f()` and does not wait for it before Shutdown returns), so
+	// there is no happens-before edge between it writing the timestamp
+	// and this test goroutine reading it afterwards -- a plain shared
+	// variable here is a data race that only shows up under -race. A
+	// buffered channel fixes this the same way readyMidSleep below
+	// already does: per the Go memory model, "a send on a channel
+	// happens before the corresponding receive from that channel
+	// completes", so receiving from shutdownCalled is itself the
+	// synchronization point, and the value it hands back can be read
+	// freely afterwards.
+	shutdownCalled := make(chan time.Time, 1)
 	httpServer.RegisterOnShutdown(func() {
-		mu.Lock()
-		shutdownCalledAt = time.Now()
-		mu.Unlock()
+		shutdownCalled <- time.Now()
 	})
 
 	serveDone := make(chan error, 1)
@@ -90,11 +98,14 @@ func TestGracefulShutdown_OrderingAndDelay(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, delay,
 		"gracefulShutdown must not return before the configured delay has fully elapsed")
 
-	mu.Lock()
-	got := shutdownCalledAt
-	mu.Unlock()
-	require.False(t, got.IsZero(), "http.Server.Shutdown must have been called")
-	require.GreaterOrEqual(t, got.Sub(start), delay,
+	var shutdownCalledAt time.Time
+	select {
+	case shutdownCalledAt = <-shutdownCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RegisterOnShutdown's callback never ran within 2s of gracefulShutdown returning")
+	}
+	require.False(t, shutdownCalledAt.IsZero(), "http.Server.Shutdown must have been called")
+	require.GreaterOrEqual(t, shutdownCalledAt.Sub(start), delay,
 		"http.Server.Shutdown must not be invoked until after the configured delay has elapsed -- "+
 			"this is what fails if phases 2 and 3 are ever reordered")
 
