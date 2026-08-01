@@ -1,0 +1,291 @@
+# 9. Webhook certificate strategy: operator-generated, self-signed, regenerated every start
+
+## Status
+
+Accepted
+
+## Context
+
+Task 4 adds two admission webhooks to `plant-operator` -- a mutating defaulter
+and a validating rule set (`api/v1alpha1/plant_webhook.go`). Both are TLS
+services: the API server refuses to call an admission webhook over plaintext,
+so `plant-operator` needs a serving certificate the API server will trust,
+before it can accept a single Plant write once the `ValidatingWebhookConfiguration`
+exists.
+
+Three ways to get that certificate, all considered:
+
+1. **cert-manager.** The standard answer for any real kubebuilder-scaffolded
+   operator: install cert-manager, annotate the webhook configurations for
+   CA injection, and let its own controller mint and rotate a certificate
+   into a Secret. **Not installed on this cluster, and this task's own brief
+   is explicit that adding it is out of proportion for a local demo** -- a
+   second Helm release, two more CRDs (`Certificate`, `Issuer`), and a second
+   controller to keep healthy, all to solve a problem this project's own
+   scope is small enough not to need solved generally. The same reasoning
+   ADR 0008 gives for rejecting a Prometheus Adapter just to unblock an HPA
+   applies here: correct in general, disproportionate for what this repo is
+   demonstrating.
+2. **A manual `openssl` step**, documented in the README. Rejected outright
+   by this task's own constraint: "the demo must NOT require a manual
+   openssl step." A step a developer has to remember, on a fresh clone, is a
+   step that will eventually be forgotten, and the failure mode (webhook
+   `failurePolicy: Fail` silently blocking every Plant write) is a bad first
+   impression for a portfolio project's very first `make demo-operator` run.
+3. **The operator generates its own self-signed CA and serving certificate,
+   at every process startup**, writes them to an `emptyDir`-backed
+   `CertDir`, and patches the resulting CA's PEM bytes into the `caBundle`
+   field of both webhook configurations using its own ServiceAccount. No new
+   component, no new CRD, no manual step, works identically whether the
+   operator was installed via kustomize or the Helm chart.
+
+Option 3 was the brief's own recommended approach, and nothing found while
+implementing it changed that recommendation. It is the choice this ADR
+records.
+
+### The genuine trade-off: no cross-process durability
+
+A cert-manager-issued certificate lives in a Secret and survives every
+container that reads it. This one does not: it is generated fresh, in
+memory, by `cmd/plant-operator/webhookcerts.go`'s
+`generateWebhookServingCertificate`, at the top of every `main()` run, and
+written only to an `emptyDir` volume -- which is deleted the moment its Pod
+is. A crash, a rollout, a node reschedule: every one of them means a brand
+new CA, a brand new serving certificate, and a fresh `caBundle` patch onto
+both webhook configurations, every single time. Nothing about the previous
+certificate is ever reused or trusted again.
+
+This is deliberate, not an oversight bought back with a TODO:
+
+- **Nothing in this project needs the certificate to outlive its process.**
+  The only client that ever needs to trust it is the API server's own
+  webhook dispatcher, which reads `caBundle` fresh off the
+  `{Mutating,Validating}WebhookConfiguration` object on every call -- not
+  once, cached, at controller startup. Regenerating both together, in the
+  same startup sequence, keeps them trivially consistent: there is no
+  version-skew window where a new Pod serves a new certificate that an old,
+  un-patched `caBundle` doesn't yet trust (or vice versa), because the same
+  process that starts serving the new certificate is also the one that just
+  patched the `caBundle` naming it, moments before.
+- **The certificate never needs rotation logic.** It is
+  `webhookCertificateValidity` (24h) from the moment the process starts, well
+  past comfortable for a container that gets rescheduled far more often than
+  that on a dev cluster -- and if a pod genuinely lived 24h uninterrupted,
+  the fix is the same one a crash already exercises: the container restarts
+  (or is restarted) and mints a new one. There is no rotation code to get
+  wrong because there is no rotation; there is only "regenerate at startup,"
+  the same operation whether triggered by a crash, a rollout, or (in
+  principle) an expiring cert.
+- **A stale `caBundle` cannot silently linger.** With a Secret-backed
+  cert-manager certificate, an operator that failed to restart for months
+  could still be serving a certificate nobody re-validated recently. Here,
+  every restart is a hard reset: old cert discarded, old trust relationship
+  discarded, both replaced atomically as one of the very first things
+  `main()` does.
+
+The cost is symmetrical: a webhook server that is down for any reason is
+*also* not a webhook server anyone could dial with a still-valid, still-
+trusted certificate to fall back on -- there is no cached trust to lean on
+during an outage, which is fine, because a downed operator has nothing
+useful to validate against anyway (see the failure-mode discussion below).
+
+## Decision
+
+`cmd/plant-operator/webhookcerts.go`:
+
+- **`generateWebhookServingCertificate`** creates a fresh ECDSA P-256 CA
+  (self-signed, `IsCA: true`) and a leaf serving certificate it signs,
+  carrying every DNS name the webhook Service could be dialed by
+  (`webhookServiceDNSNames`: bare, namespaced, `.svc`, and
+  `.svc.cluster.local` forms) plus `127.0.0.1` for local debugging. It
+  writes `tls.crt`/`tls.key` to `--webhook-cert-dir` (default
+  `/tmp/k8s-webhook-server/serving-certs`, controller-runtime's own
+  `webhook.Server` convention) and returns the CA's own PEM bytes.
+- **`patchWebhookCABundles`** builds a direct (uncached) client from the
+  operator's own in-cluster config, `Get`s the two webhook configurations by
+  name, sets every entry's `clientConfig.caBundle` to those PEM bytes, and
+  `Update`s them -- retrying with a bounded exponential backoff (up to
+  ~30s total) so a `kubectl apply -k deploy/kustomize/operator` that applies
+  the RBAC/webhook manifests and the Deployment in one pass, with no
+  ordering guarantee between them, does not race a not-yet-created
+  `ValidatingWebhookConfiguration`.
+- `cmd/plant-operator/main.go` calls both, in that order, **before**
+  constructing the `ctrl.Manager` (and therefore before its webhook server
+  binds `--webhook-port`, default 9443) -- a request can never reach a
+  webhook server whose own certificate isn't already on disk, and the
+  `caBundle` naming that certificate's CA is patched in before the server
+  starts listening for it.
+
+### RBAC: a real, narrowly-scoped privilege increase
+
+Patching a cluster-scoped object needs cluster-scoped RBAC that did not
+exist before Task 4:
+
+```
++kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;update;patch,resourceNames=plant-operator-mutating-webhook-configuration;plant-operator-validating-webhook-configuration
+```
+
+This **is** a genuine privilege increase over Plan 2's RBAC (`config/rbac/role.yaml`
+gained a new rule), reported as such rather than folded silently into the
+same commit as everything else. It is scoped as narrowly as the
+`admissionregistration.k8s.io` API allows for these two resource kinds:
+
+- **`resourceNames` pins the grant to exactly two, specific, already-known
+  objects** -- not "every `MutatingWebhookConfiguration` on the cluster,"
+  which is the alternative a naive `resources: mutatingwebhookconfigurations`
+  rule with no `resourceNames` would grant. `resourceNames` **is** honored by
+  the Kubernetes API server for `get`, `update`, and `patch` on
+  cluster-scoped resources -- confirmed against the RBAC authorizer, and
+  proven by this project's own live-cluster verification (Task 4's own
+  `patchWebhookCABundles` succeeding while scoped this way).
+- **`list` and `watch` are deliberately absent.** Kubernetes RBAC's own
+  documented limitation is that `resourceNames` cannot narrow `list` or
+  `watch` requests at all -- a rule combining either verb with
+  `resourceNames` is accepted by the API server but does not actually
+  restrict what it returns; requesting either verb here would therefore
+  have meant either granting collection-wide list/watch access (defeating
+  the whole point of naming two specific objects) or shipping a rule that
+  looks scoped but isn't. `patchWebhookCABundles` never lists: it already
+  knows both names (they are `cmd/plant-operator`'s own
+  `--mutating-webhook-configuration-name` / `--validating-webhook-
+  configuration-name` flags, matching what `api/v1alpha1/plant_webhook.go`'s
+  `+kubebuilder:webhookconfiguration` markers bake into
+  `config/webhook/manifests.yaml`), so it only ever needs `Get`, which
+  **is** correctly restricted by `resourceNames`.
+- **No `create` or `delete`.** Both webhook configuration objects must
+  already exist (created by the same `kubectl apply -k
+  deploy/kustomize/operator` / `helm install` that deploys everything else)
+  before this code ever runs; it only ever mutates a field on an object it
+  did not create and will never remove.
+
+The two Helm-chart object names differ from the kustomize path's fixed
+`plant-operator-*` names (they are release-scoped --
+`{{ include "k8s-buddy.fullname" . }}-mutating-webhook-configuration`, the
+same pattern `templates/clusterrole.yaml`'s own `metadata.name` already
+uses, and for the identical reason: two independent chart installs, or a
+chart install alongside the kustomize path, must never collide on a
+cluster-scoped object's name). `charts/k8s-buddy/templates/deployment.yaml`
+passes both names explicitly via `--mutating-webhook-configuration-name` /
+`--validating-webhook-configuration-name` args; `templates/clusterrole.yaml`'s
+own `resourceNames` are templated to match. `hack/check-helm-rbac-drift.py`
+was extended (not weakened) to account for this: it still asserts every
+other field of every rule matches `config/rbac/role.yaml` exactly, and for
+`resourceNames` specifically it asserts *presence and count* rather than
+*exact value* -- a rule silently losing its narrowing altogether (chart or
+source) is still caught; the fact that a release-scoped name and a
+fixed name are different strings, by design, is not.
+
+### Failure policy: Ignore for defaulting, Fail for validating -- and why that's safe
+
+`+kubebuilder:webhook` markers on `SetupPlantWebhookWithManager`
+(`api/v1alpha1/plant_webhook.go`) set:
+
+- **Mutating (defaulting) webhook: `failurePolicy: Ignore`.** Safe to fail
+  open because it has a fully adequate fallback that runs regardless of
+  whether this webhook is reachable at all: the CRD's own
+  `+kubebuilder:default` markers (`plant_types.go`), which
+  `plant_webhook_test.go`'s `TestDefaultingAgreesWithCRDSchema` mechanically
+  proves apply the *exact same values* this webhook does. An operator that
+  is down when a Plant is created still gets a fully-defaulted Plant --
+  CRD-level defaulting has no dependency on the webhook server being up at
+  all.
+- **Validating webhook: `failurePolicy: Fail`.** The brief calls this "the
+  more correct choice for a validating webhook," and this project agrees:
+  `Ignore` here would mean an operator outage silently stops enforcing
+  species immutability and the image registry allowlist -- exactly the two
+  rules that exist **because** nothing else enforces them. A validating
+  webhook that fails open enforces nothing when it matters most, which is
+  worse than not having it.
+
+**`Fail` on a validating webhook is the textbook way to lock a cluster out of
+managing a resource if the webhook target is unreachable — this project
+avoids that specific failure mode structurally, not by hoping the operator
+never goes down:**
+
+- **The webhook's own `rules` never list the `DELETE` operation** -- only
+  `CREATE` and `UPDATE` (`verbs=create;update` on both
+  `+kubebuilder:webhook` markers). `kubectl delete plant <name>` never
+  reaches this webhook at all, reachable or not, so an operator outage can
+  never prevent a Plant from being deleted. This is the same posture ADR
+  0007 already commits to for finalizers -- "nothing this operator owns
+  should be able to make a Plant undeletable" -- applied to admission
+  instead of garbage collection.
+- **Recovering from an operator outage, concretely:** while `plant-operator`
+  is down (crashed, mid-rollout, scaled to zero, or simply not yet deployed
+  on a fresh cluster after the CRD and webhook configurations already are),
+  every `CREATE`/`UPDATE` of a Plant is rejected with a clear "webhook ...
+  failed calling webhook" error -- an honest signal, not a silent no-op or
+  data corruption. Recovery is simply making the operator healthy again
+  (`kubectl -n k8s-buddy-system rollout status deployment/plant-operator`,
+  or fixing whatever crashed it): the moment its Pod is Ready again, the
+  Service routes to it, TLS succeeds against the `caBundle` it patched in at
+  startup, and writes resume with no further action. There is no manual
+  `caBundle` fix-up, no finalizer to strip, no stuck object -- this is a
+  strict subset of ADR 0007's own "the operator being down never makes a
+  Plant undeletable" guarantee, extended to "an operator outage blocks
+  *writes*, cleanly, and un-blocks itself the moment the operator is
+  healthy again."
+  - The one true last resort, for an admin who needs Plant writes to
+    proceed *before* the operator can be fixed (e.g. debugging the operator
+    itself by editing a Plant it reconciles): `kubectl delete
+    validatingwebhookconfiguration plant-operator-validating-webhook-configuration`
+    removes the gate entirely. This is a deliberate, visible, cluster-admin-only
+    escape hatch, not a code path -- exactly the kind of "folklore operation"
+    ADR 0007 warns against baking into the operator's own logic, but perfectly
+    appropriate as a documented manual recovery step here, since it requires
+    the same `cluster-admin`-level RBAC that could just as easily delete the
+    Plant's namespace outright.
+- **`timeoutSeconds: 5`** on both webhooks (well under the API server's own
+  30s admission ceiling) bounds how long a single Plant write can hang
+  behind an unresponsive-but-not-yet-declared-down webhook server, rather
+  than tying up the requesting client for the platform default of 10s.
+- No `namespaceSelector`/`objectSelector` narrows either rule further. Both
+  already scope as tightly as the type system allows --
+  `apiGroups: [buddy.k8s-buddy.io]`, `resources: [plants]` -- and `Plant` is
+  a project-specific CRD that cannot exist in `kube-system` or any other
+  namespace this project doesn't itself manage; a selector would only ever
+  be useful to *exempt* a namespace Plants are never created in, which adds
+  a knob with nothing real to turn.
+
+## Consequences
+
+- No cert-manager dependency, no manual certificate step, and no CRD beyond
+  `Plant` itself -- `make demo-operator` reaches a fully working webhook
+  install in the same one command it always has.
+- The certificate is regenerated, and both `caBundle`s re-patched, on every
+  single restart of `plant-operator` -- verified live: redeploying the
+  operator with `make deploy-operator` produces a new CA each time
+  (`kubectl get {mutating,validating}webhookconfiguration ... -o
+  jsonpath='{.webhooks[0].clientConfig.caBundle}'` differs across restarts),
+  and both configurations' `caBundle` are populated and non-empty within
+  seconds of the Pod reporting Ready.
+- `config/rbac/role.yaml` (and `charts/k8s-buddy/templates/clusterrole.yaml`)
+  carry one new rule neither had before Task 4:
+  `admissionregistration.k8s.io` `get`/`update`/`patch` on
+  `{mutating,validating}webhookconfigurations`, `resourceNames`-pinned to
+  exactly the two objects this project ships. `hack/check-helm-rbac-drift.py`
+  was extended, not disabled, to keep asserting the chart and
+  `config/rbac/role.yaml` agree on everything except the (by-design,
+  install-method-scoped) exact resource name strings.
+- The mutating webhook is safe to leave `failurePolicy: Ignore` forever: it
+  duplicates, and can never diverge from (mechanically enforced by
+  `TestDefaultingAgreesWithCRDSchema`), what the CRD schema already
+  guarantees on its own.
+- The validating webhook's `failurePolicy: Fail` means a Plant `CREATE`/
+  `UPDATE` genuinely blocks while `plant-operator` is unreachable. This is
+  the deliberate, correct trade for a webhook whose entire reason to exist
+  is enforcing rules nothing else does; `DELETE` is structurally exempt, so
+  the cluster can never become unable to *remove* a Plant, only temporarily
+  unable to *write* one -- and that condition self-heals the moment the
+  operator is healthy again, with no manual recovery step required in the
+  ordinary case.
+- If this project ever needs a certificate to survive a restart (multiple
+  operator replicas needing to agree on one certificate rather than each
+  minting its own, for instance, which would currently work -- each
+  replica's webhook server presents its own independently-trusted
+  certificate, and the API server accepts whichever `caBundle` was patched
+  in most recently by whichever replica's `patchWebhookCABundles` ran last,
+  which is fine today because only one replica exists in the Deployment's
+  own `replicas: 1` -- but would become a real footgun with `replicas: 2+`
+  redeploying independently), that is the point at which this ADR is
+  superseded in favor of cert-manager or a shared Secret, not amended.
