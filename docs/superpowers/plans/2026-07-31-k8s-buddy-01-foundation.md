@@ -228,7 +228,14 @@ Pure logic, no Kubernetes and no HTTP imports. This is the most-read file in the
 repo for a reviewer judging code quality — make it exemplary.
 
 Implement the `Mood` type, constants, `AllMoods`, `Message`, `Signals`, `Score`,
-and `FromScore` exactly as given in the Interfaces block.
+`FromScore`, **and `Report` plus its constructor `NewReport`** exactly as given in
+the Interfaces block. `Report` lives here rather than in `internal/api` so that
+mood, message, and health score are always derived together and cannot disagree;
+`NewReport` is the only way Task 4 is allowed to build one.
+
+`NewReport(s Signals, name, species string, uptime time.Duration) Report` computes
+the score once and derives mood and message from it. `CheckedAt` reads a
+package-level unexported `var now = time.Now` so tests can stub the clock.
 
 `Signals.Score()` computes a weighted composite, clamped to `[0,100]`:
 - Not ready is dominant: if `Ready` is false, the score can never exceed `35`.
@@ -292,7 +299,9 @@ third-party router.
   **not** consult readiness or mood; a merely unhappy plant must not be restarted
   by the kubelet. Put that reasoning in a code comment — reviewers look for it.
 - `GET /readyz` — `200` when ready, `503` with `{"status":"not ready"}` otherwise.
-- `GET /status` — the `mood.Report` JSON.
+- `GET /status` — the `mood.Report` JSON. Build it **only** via `mood.NewReport`
+  (added in Task 2); do not assemble the struct field-by-field, or mood and score
+  can drift apart.
 - `GET /work` — sleeps a random duration in `[WorkMinDelay, WorkMaxDelay]`, then
   returns `success`, or `warning` when the roll exceeds the budget, or `failure`
   (HTTP 500) with probability `WorkErrorRate`. Records `ObserveWork`. The
