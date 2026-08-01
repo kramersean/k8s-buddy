@@ -280,7 +280,10 @@ has `ts`, `level`, and `msg` keys by unmarshalling into a map.
 
 **Files:** `internal/api/server.go`, `internal/api/handlers.go`,
 `internal/api/middleware.go`, `internal/api/server_test.go`,
-`cmd/buddy-api/main.go`
+`cmd/buddy-api/main.go`, `Makefile` (add one target)
+
+This task also adds a `test-race` Makefile target (`go test -race ./...`,
+with a `##` help comment). It is not part of the default `test` target.
 
 Routes on `net/http`'s `http.ServeMux` with method patterns (`GET /healthz`), no
 third-party router.
@@ -326,8 +329,14 @@ into `mood.Report` with a mood matching its score; `/work` with a seeded RNG and
 middleware turns a panicking handler into a 500 without killing the process;
 `ObserveHTTP` records the route pattern for a 404-ish path rather than the raw URL.
 
-**Verify:** `go test ./... -race` passes; `make lint` clean;
-`go run ./cmd/buddy-api` then `curl localhost:8080/status` returns a mood.
+**Verify:** `make test` passes; `make lint` clean; `go run ./cmd/buddy-api` then
+`curl localhost:8080/status` returns a mood.
+
+*Note on `-race`:* the race detector needs cgo and a C toolchain, which this
+Windows development box does not have. `make test` therefore runs without
+`-race`, and a separate `make test-race` target exists for platforms that
+support it. CI runs `test-race` on `ubuntu-latest` (see Task 7). Do not add
+`-race` to the default `test` target.
 
 ---
 
@@ -414,7 +423,10 @@ deleting a pod results in a replacement reaching Ready and `hack/demo.sh` exitin
 
 - `lint` — `actions/setup-go` with `cache: true`, then `make lint` and a
   `gofmt -l` check that fails if output is non-empty.
-- `test` — `make test-cover`, upload coverage as an artifact.
+- `test` — runs on `ubuntu-latest`, which has a C toolchain, so it invokes
+  `make test-race` (race detector enabled) followed by `make test-cover`, and
+  uploads coverage as an artifact. The race detector must run somewhere, and
+  Linux CI is that somewhere.
 - `build` — `docker/setup-buildx-action`, build for `linux/amd64,linux/arm64`,
   push only on a `main` push (not on PRs), and generate an SBOM with
   `anchore/sbom-action`.
