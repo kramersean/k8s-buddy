@@ -613,9 +613,35 @@ demo: kind-up docker-build kind-load deploy ## Demo A -- static manifests (Plan 
 # deploy-operator itself pulls in install-crd, docker-build-operator, and
 # kind-load-operator, so they are not repeated here.
 .PHONY: demo-operator
+# The Plant apply below is retried, not fired once: deploy-operator's own
+# `rollout status` wait only proves the operator's Pod itself reports Ready
+# (readyProbe on :8082/readyz, answered by the manager's health server, which
+# starts before -- and is not gated on -- the webhook TLS listener on :9443
+# actually being routable through the Service). On kind, kube-proxy's
+# ClusterIP -> pod-IP programming lands a beat after the Endpoints object
+# does, so `kubectl apply -f $(PLANT_SAMPLE)` run immediately after
+# deploy-operator returns can hit the validating webhook before the Service
+# can reach it at all: "dial tcp <clusterIP>:443: connect: connection
+# refused" -- observed reproducibly (not a one-off) on a clean-room rebuild,
+# CI never surfaced it only because the ServiceMonitor-CRD-install step
+# between deploy-operator and the Plant apply already burns several seconds
+# on a real network round trip. The retry loop is the fix, not a longer
+# sleep: `kubectl apply` is idempotent, so retrying it is safe, and it
+# succeeds the moment the Service is actually routable rather than after a
+# fixed, possibly-wrong guess.
 demo-operator: kind-up docker-build kind-load deploy-operator ## Demo B -- Plant CRD + operator (RECOMMENDED): kind-up -> build both -> load both -> CRD -> operator -> apply a Plant -> wait -> kubectl get plants
 	kubectl apply -k $(PLANTS_BASE)
-	kubectl apply -f $(PLANT_SAMPLE)
+	@for i in $$(seq 1 15); do \
+		if kubectl apply -f $(PLANT_SAMPLE); then \
+			break; \
+		fi; \
+		if [ "$$i" -eq 15 ]; then \
+			echo "demo-operator: kubectl apply -f $(PLANT_SAMPLE) never succeeded -- the webhook Service never became reachable" >&2; \
+			exit 1; \
+		fi; \
+		echo "  demo-operator: apply failed (webhook Service likely not yet routable), retrying (attempt $$i/15)..." >&2; \
+		sleep 2; \
+	done
 	@echo "demo-operator: waiting for plant/$(PLANT_NAME) in $(PLANT_NAMESPACE) to report status.readyReplicas == spec.replicas..."
 	@for i in $$(seq 1 60); do \
 		desired="$$(kubectl -n $(PLANT_NAMESPACE) get plant $(PLANT_NAME) -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"; \
