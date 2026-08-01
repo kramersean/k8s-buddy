@@ -26,7 +26,9 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +54,7 @@ import (
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
 )
@@ -125,6 +128,21 @@ func runSuite(m *testing.M) int {
 		ErrorIfCRDPathMissing: true,
 		BinaryAssetsDirectory: assetsDir,
 		Scheme:                testScheme,
+		// The generated Mutating/ValidatingWebhookConfiguration manifests --
+		// again, never a hand-maintained copy. envtest.Environment.Start
+		// installs both, generates its own self-signed serving certificate
+		// (nothing to do with cmd/plant-operator's own production
+		// certificate bootstrap -- see docs/adr/0009 -- envtest has always
+		// had its own, unrelated mechanism for this), and rewrites each
+		// webhook's clientConfig to point at
+		// WebhookInstallOptions.LocalServingHost:LocalServingPort instead of
+		// the Service reference config/webhook/manifests.yaml carries --
+		// there is no Service, no kube-proxy, and no cluster DNS inside
+		// envtest's fake control plane for a Service reference to resolve
+		// against.
+		WebhookInstallOptions: envtest.WebhookInstallOptions{
+			Paths: []string{filepath.Join("..", "..", "config", "webhook")},
+		},
 	}
 
 	cfg, err := testEnv.Start()
@@ -174,6 +192,16 @@ func runSuite(m *testing.M) int {
 		// own tooling running on the same dev box.
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
+		// LocalServingHost/Port/CertDir were populated by testEnv.Start()
+		// above (WebhookInstallOptions.ModifyWebhookDefinitions, called as
+		// part of installing the two webhook configurations) -- this is what
+		// makes the manager's webhook server actually listen where the API
+		// server was just told to find it.
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Host:    testEnv.WebhookInstallOptions.LocalServingHost,
+			Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+			CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		}),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "building manager:", err)
@@ -210,12 +238,29 @@ func runSuite(m *testing.M) int {
 		return 1
 	}
 
+	// buddyv1alpha1.DefaultAllowedImageRegistries() -- the same allowlist
+	// cmd/plant-operator/main.go defaults to when neither
+	// --allowed-image-registries nor its env var is set -- so this suite's
+	// disallowed-registry case (TestWebhook_ValidatingRejectsDisallowedImage)
+	// exercises the exact configuration a real deployment ships with, not a
+	// test-only allowlist that could hide a divergence.
+	if err := buddyv1alpha1.SetupPlantWebhookWithManager(testMgr, buddyv1alpha1.DefaultAllowedImageRegistries()); err != nil {
+		fmt.Fprintln(os.Stderr, "wiring Plant webhooks into the manager:", err)
+		return 1
+	}
+
 	testCtx, testCancel = context.WithCancel(context.Background())
 	mgrDone := make(chan error, 1)
 	go func() { mgrDone <- testMgr.Start(testCtx) }()
 
 	if !testMgr.GetCache().WaitForCacheSync(testCtx) {
 		fmt.Fprintln(os.Stderr, "manager cache never synced")
+		testCancel()
+		return 1
+	}
+
+	if err := waitForWebhookServerReady(testCtx, testEnv.WebhookInstallOptions.LocalServingHost, testEnv.WebhookInstallOptions.LocalServingPort); err != nil {
+		fmt.Fprintln(os.Stderr, "webhook server never came up:", err)
 		testCancel()
 		return 1
 	}
@@ -233,6 +278,45 @@ func runSuite(m *testing.M) int {
 	}
 
 	return code
+}
+
+// waitForWebhookServerReady polls a bare TLS dial against
+// host:port until it succeeds or ctx is done, so runSuite never starts
+// m.Run() -- and therefore never runs a single Plant-creating test -- before
+// the manager's webhook server (started asynchronously by testMgr.Start,
+// alongside every other manager Runnable) is actually accepting
+// connections. Without this, the suite's own first webhook-exercising test
+// would race the webhook server's own startup, failing intermittently
+// (rather than deterministically) depending on how fast that goroutine
+// happens to schedule.
+//
+// InsecureSkipVerify is correct here, not a shortcut: this dial only proves
+// "something is listening and completed a TLS handshake" -- it deliberately
+// does not verify the served certificate is the one envtest's own generated
+// CA (testEnv.WebhookInstallOptions.LocalServingCAData) signed, because that
+// verification is the API server's job (and every actual webhook-triggering
+// test below exercises exactly that, through a real Plant Create/Update
+// against the real API server envtest booted).
+func waitForWebhookServerReady(ctx context.Context, host string, port int) error {
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	dialer := &net.Dialer{}
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // see doc comment: this dial proves liveness only, never trust.
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("webhook server at %s never accepted a TLS connection within 30s: %w", addr, lastErr)
 }
 
 // resolveKubebuilderAssets finds the directory containing the envtest

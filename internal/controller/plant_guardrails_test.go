@@ -340,12 +340,17 @@ func TestPlantAdmission_RejectsMalformedImage(t *testing.T) {
 		})
 	}
 
-	// Shapes that must keep working: the project's own default, a bare name,
-	// a registry with a port, and a digest reference.
+	// Shapes that must keep working: the project's own default, a bare name
+	// (implicitly docker.io/library/, which Task 4's default image-registry
+	// allowlist permits -- see api/v1alpha1/plant_webhook.go's
+	// normalizeImageRegistry), and a digest reference. A registry-with-port
+	// case ("localhost:5000/buddy-api:v1.2.3") used to live in this loop
+	// too, before Task 4 added PlantCustomValidator's registry allowlist;
+	// see TestPlantAdmission_ImagePatternValidButRegistryDisallowed below
+	// for why it moved out, and for what it proves instead.
 	for _, image := range []string{
 		"ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev",
 		"buddy-api",
-		"localhost:5000/buddy-api:v1.2.3",
 		"ghcr.io/sean-kramer/k8s-buddy/buddy-api@sha256:" + strings.Repeat("a", 64),
 	} {
 		t.Run("accepts "+image, func(t *testing.T) {
@@ -354,4 +359,28 @@ func TestPlantAdmission_RejectsMalformedImage(t *testing.T) {
 			createPlant(t, plant)
 		})
 	}
+}
+
+// TestPlantAdmission_ImagePatternValidButRegistryDisallowed is a deliberate
+// two-layer proof, added alongside Task 4's admission webhooks: an image
+// whose registry carries an explicit port ("localhost:5000/...") is exactly
+// the shape TestPlantAdmission_RejectsMalformedImage's own Pattern is
+// designed to admit (see that field's own comment in plant_types.go) -- the
+// CRD's OpenAPI schema alone would accept this write. It is rejected anyway,
+// because PlantCustomValidator's registry allowlist (api/v1alpha1/
+// plant_webhook.go, defaulting to ghcr.io/ and docker.io/library/ -- see
+// suite_test.go's own SetupPlantWebhookWithManager call) is a SECOND,
+// independent gate the schema cannot express or replace. This is the
+// clearest place in the suite to see both layers doing genuinely different
+// jobs on the very same field.
+func TestPlantAdmission_ImagePatternValidButRegistryDisallowed(t *testing.T) {
+	ns := newTestNamespace(t)
+	plant := newTestPlant(ns, "portimage", 3)
+	plant.Spec.Image = "localhost:5000/buddy-api:v1.2.3"
+
+	err := testClient.Create(testCtx, plant)
+	require.Error(t, err, "spec.image %q matches the CRD's own Pattern but is outside PlantCustomValidator's allowlist, and must still be rejected", plant.Spec.Image)
+	require.False(t, apierrors.IsInvalid(err),
+		"a registry-allowlist rejection comes from the validating webhook, not CRD schema validation, so this must NOT be a structural Invalid error")
+	require.Contains(t, err.Error(), "localhost:5000/buddy-api:v1.2.3")
 }
