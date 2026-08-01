@@ -582,11 +582,11 @@ func TestComputeStatus_LastTransitionTimePreservedAcrossNoOpCall(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{ObservedGeneration: 1, ReadyReplicas: 0},
 	}
 
-	first := computeStatus(plant, deployment)
+	first := computeStatus(plant, deployment, time.Now)
 	require.NotEmpty(t, first.Conditions)
 
 	plant.Status = first
-	second := computeStatus(plant, deployment)
+	second := computeStatus(plant, deployment, time.Now)
 
 	firstByType := conditionsByType(first.Conditions)
 	secondByType := conditionsByType(second.Conditions)

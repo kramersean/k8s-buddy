@@ -393,7 +393,7 @@ func (r *PlantReconciler) markDegraded(ctx context.Context, plant *buddyv1alpha1
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: plant.Generation,
-		LastTransitionTime: metav1.NewTime(now()),
+		LastTransitionTime: metav1.NewTime(time.Now()),
 	})
 	newStatus.Conditions = conditions
 
@@ -1022,7 +1022,7 @@ func (r *PlantReconciler) reconcileStatus(ctx context.Context, plant *buddyv1alp
 	log := logf.FromContext(ctx)
 
 	oldStatus := plant.Status
-	newStatus := computeStatus(plant, deployment)
+	newStatus := computeStatus(plant, deployment, time.Now)
 
 	if !statusChanged(oldStatus, newStatus) {
 		log.V(1).Info("status unchanged; skipping status write", "plant", plant.Name)

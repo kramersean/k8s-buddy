@@ -1,12 +1,17 @@
 // This file (status.go) contains only the "desired status" computation: a
 // pure function from a *Plant and its observed Deployment to the PlantStatus
 // the operator should write. Like resources.go's builders, it takes no
-// client.Client and no context.Context — the one exception is the package
-// clock, which is read through the unexported now indirection below so
-// tests can stub it instead of racing the real clock. Keeping the
-// arithmetic here, separate from plant_controller.go's I/O, is what lets
-// every rule in the conditions table be asserted directly in status_test.go
-// without a fake client or a running API server.
+// client.Client and no context.Context — the one exception is the clock,
+// which computeStatus and conditionsFor take as an explicit
+// now func() time.Time parameter rather than reading a package-level
+// variable, specifically so tests can inject a deterministic clock without
+// any state shared between them. (An earlier version of this file used a
+// package-level `now` var that tests reassigned directly; combined with
+// t.Parallel, that was a genuine data race — see status_test.go's stubNow
+// history — which is why this file takes the clock as a parameter instead.)
+// Keeping the arithmetic here, separate from plant_controller.go's I/O, is
+// what lets every rule in the conditions table be asserted directly in
+// status_test.go without a fake client or a running API server.
 //
 // See resources.go for the package's own doc comment.
 
@@ -56,26 +61,21 @@ const (
 	ReasonPlantHealthy = "PlantHealthy"
 )
 
-// now returns the current time. It is a package-level indirection purely so
-// tests can stub it out and assert a deterministic LastWatered instead of
-// racing the real clock — the same pattern internal/mood uses for
-// CheckedAt.
-var now = time.Now
-
 // computeStatus derives the PlantStatus that plant should carry, given the
-// Deployment the reconciler observed for it. It is pure: the same (plant,
-// deployment) pair — modulo the now() read for LastWatered — always
-// produces the same result, which is what makes the change-comparison in
-// statusChanged (see plant_controller.go) meaningful: two calls to
-// computeStatus for an unchanged Plant and Deployment differ only in
-// LastWatered.
+// Deployment the reconciler observed for it, and a now func to read the
+// current time from (the reconciler passes time.Now; tests pass a fixed
+// clock). It is pure: the same (plant, deployment, now) triple — modulo the
+// now() read for LastWatered — always produces the same result, which is
+// what makes the change-comparison in statusChanged (see
+// plant_controller.go) meaningful: two calls to computeStatus for an
+// unchanged Plant and Deployment differ only in LastWatered.
 //
 // plant.Status.Conditions is read (not mutated) as the prior condition set
 // so meta.SetStatusCondition can preserve LastTransitionTime across calls
 // where the condition's Status hasn't changed; the returned PlantStatus
 // carries a freshly built Conditions slice, never plant.Status.Conditions
 // itself.
-func computeStatus(plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) buddyv1alpha1.PlantStatus {
+func computeStatus(plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment, now func() time.Time) buddyv1alpha1.PlantStatus {
 	ready := deployment.Status.ReadyReplicas
 	desired := desiredReplicas(plant)
 	generation := plant.Generation
@@ -96,7 +96,7 @@ func computeStatus(plant *buddyv1alpha1.Plant, deployment *appsv1.Deployment) bu
 	// would report every condition as freshly transitioning on every
 	// single reconcile.
 	conditions := append([]metav1.Condition(nil), plant.Status.Conditions...)
-	for _, c := range conditionsFor(ready, desired, deployment, generation) {
+	for _, c := range conditionsFor(ready, desired, deployment, generation, now) {
 		meta.SetStatusCondition(&conditions, c)
 	}
 	status.Conditions = conditions
@@ -199,7 +199,7 @@ func moodFor(ready, desired int32) mood.Mood {
 // to generation (the Plant's own metadata.generation), so a consumer can
 // tell whether a condition reflects the most recent spec change or an
 // older one still being processed.
-func conditionsFor(ready, desired int32, deployment *appsv1.Deployment, generation int64) []metav1.Condition {
+func conditionsFor(ready, desired int32, deployment *appsv1.Deployment, generation int64, now func() time.Time) []metav1.Condition {
 	transitionTime := metav1.NewTime(now())
 
 	readyCondition := metav1.Condition{

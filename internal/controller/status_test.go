@@ -1,7 +1,7 @@
 // This test file lives in package controller (not controller_test) rather
-// than resources_test.go's external package specifically so it can stub the
-// unexported now indirection in status.go and assert a deterministic
-// LastWatered instead of racing the real clock.
+// than resources_test.go's external package specifically so it can call the
+// unexported computeStatus/conditionsFor/moodFor/healthPercent/statusChanged
+// functions in status.go directly.
 package controller
 
 import (
@@ -17,14 +17,17 @@ import (
 	"github.com/kramersean/k8s-buddy/internal/mood"
 )
 
-// stubNow replaces the package-level now indirection with a clock fixed at
-// t for the duration of the calling test, restoring the real clock via
-// t.Cleanup.
-func stubNow(t *testing.T, at time.Time) {
-	t.Helper()
-	prev := now
-	now = func() time.Time { return at }
-	t.Cleanup(func() { now = prev })
+// fixedClock returns a now func() time.Time that always returns at. Tests
+// use it to give computeStatus/conditionsFor a deterministic clock,
+// entirely as a local value passed by parameter — unlike an earlier version
+// of this file, which stubbed a package-level `now` var by reassigning it
+// directly. That reassignment raced under t.Parallel (every parallel test
+// in this file reads/writes the same package-level variable concurrently);
+// passing the clock as a function parameter instead means each test gets
+// its own value with nothing shared, so tests can stay parallel with no
+// race at all.
+func fixedClock(at time.Time) func() time.Time {
+	return func() time.Time { return at }
 }
 
 // testPlant returns a fully-defaulted Plant, mirroring resources_test.go's
@@ -100,7 +103,7 @@ func TestHealthPercent(t *testing.T) {
 // regressing back to the bug TestMoodFor_ZeroReadyReportsWilting guards.
 func TestComputeStatus_MoodMatchesMoodPackage(t *testing.T) {
 	t.Parallel()
-	stubNow(t, time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	clock := fixedClock(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
 
 	tests := []struct {
 		name    string
@@ -133,7 +136,7 @@ func TestComputeStatus_MoodMatchesMoodPackage(t *testing.T) {
 				wantMood = mood.FromScore(wantSignals.Score())
 			}
 
-			status := computeStatus(plant, deployment)
+			status := computeStatus(plant, deployment, clock)
 			require.Equal(t, string(wantMood), status.Mood)
 		})
 	}
@@ -267,12 +270,12 @@ func TestMoodFor_AllSixMoodsAreReachable(t *testing.T) {
 // still handled correctly, mirroring the CRD's own +kubebuilder:default=3.
 func TestComputeStatus_NilReplicasDefaultsToThree(t *testing.T) {
 	t.Parallel()
-	stubNow(t, time.Now())
+	clock := fixedClock(time.Now())
 
 	plant := testPlant(1, nil)
 	deployment := testDeployment(3)
 
-	status := computeStatus(plant, deployment)
+	status := computeStatus(plant, deployment, clock)
 
 	require.Equal(t, int32(3), status.DesiredReplicas)
 	require.Equal(t, int32(100), status.HealthPercent)
@@ -283,13 +286,13 @@ func TestComputeStatus_NilReplicasDefaultsToThree(t *testing.T) {
 // every individual condition's ObservedGeneration.
 func TestComputeStatus_ObservedGenerationPropagates(t *testing.T) {
 	t.Parallel()
-	stubNow(t, time.Now())
+	clock := fixedClock(time.Now())
 
 	const generation = int64(7)
 	plant := testPlant(generation, ptrInt32(3))
 	deployment := testDeployment(3)
 
-	status := computeStatus(plant, deployment)
+	status := computeStatus(plant, deployment, clock)
 
 	require.Equal(t, generation, status.ObservedGeneration)
 	require.NotEmpty(t, status.Conditions)
@@ -339,7 +342,7 @@ func TestConditionsFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			conditions := conditionsFor(tc.ready, tc.desired, tc.deployment, 1)
+			conditions := conditionsFor(tc.ready, tc.desired, tc.deployment, 1, time.Now)
 
 			var found *metav1.Condition
 			for i := range conditions {
