@@ -57,15 +57,22 @@ The Makefile is the single entry point; use its targets rather than raw
 `go`/`docker`/`kubectl` invocations so local runs and CI never drift apart.
 
 ```bash
-make help          # list every available target
-make fmt vet lint   # static checks
-make test           # unit tests
+make help           # list every available target
+make fmt vet lint    # static checks
+make test            # unit tests
 make build           # compile all cmd/ binaries
-make docker-build     # build the buddy-api image
-make kind-up          # bring up the local kind cluster
-make deploy            # apply the Kubernetes manifests
-make demo               # end-to-end: cluster up, build, load, deploy, narrate
+make docker-build    # build the buddy-api image
+make kind-up         # bring up the local kind cluster (added in Task 5)
+make deploy          # apply the Kubernetes manifests (added in Task 6)
+make demo            # end-to-end: cluster up, build, load, deploy, narrate (added in Task 6)
 ```
+
+`kind-up`, `deploy`, and `demo` do not exist yet as of this task — the
+Makefile currently only defines `help`, `fmt`, `vet`, `lint`, `test`,
+`test-cover`, `build`, `docker-build`, `clean`, `tools`, and `rename-module`.
+The three annotated targets above land in later tasks per
+`docs/superpowers/plans/2026-07-31-k8s-buddy-01-foundation.md`; running them
+now fails with "No rule to make target."
 
 Prefer `kubectl apply --dry-run=client` and `helm template` before applying
 anything for real.

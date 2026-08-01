@@ -92,6 +92,10 @@ build: ## Build every ./cmd/* binary into bin/ (no-op until cmd/ exists)
 
 .PHONY: docker-build
 docker-build: ## Build the buddy-api container image, tagged with the short git SHA
+	@if [ ! -f build/Dockerfile.buddy-api ]; then \
+		echo "docker-build: build/Dockerfile.buddy-api does not exist yet (added in Task 5); nothing to build" >&2; \
+		exit 1; \
+	fi
 	docker build \
 		-f build/Dockerfile.buddy-api \
 		--build-arg VERSION=$(VERSION) \
