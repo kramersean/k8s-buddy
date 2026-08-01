@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for chaos-buddy. Mirrors build/Dockerfile.buddy-api
+# exactly -- see that file's own comments for the full reasoning behind
+# every choice below; only the binary, image identity, and exposed port
+# differ (chaos-buddy serves /metrics and /healthz on 8080, but never
+# proxies user traffic the way buddy-api does).
+#
+# Build args:
+#   VERSION -- injected into main.version via -ldflags -X (see cmd/chaos-buddy/main.go)
+#   COMMIT  -- injected into main.commit via -ldflags -X
+# Both default to "dev"/"unknown" to match the Go source defaults if the
+# caller (normally `make docker-build-chaos`) omits them.
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+# --platform=$BUILDPLATFORM pins this stage to the architecture of the
+# machine running the build, never the target's, so a multi-arch build
+# cross-compiles instead of running the whole toolchain through QEMU. See
+# build/Dockerfile.buddy-api's own comment for the full reasoning.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+# Copy only the dependency manifests first so `go mod download` is cached
+# across builds and only re-runs when go.mod/go.sum actually change --
+# editing application source must not invalidate this layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Now bring in the rest of the source and build. chaos-buddy imports only
+# cmd/ and internal/chaos/ -- it never touches api/ or internal/controller/.
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+# TARGETOS/TARGETARCH come from BuildKit and name the image being produced,
+# not the machine producing it. CGO_ENABLED=0 is what makes cross-compiling
+# free here: with no C toolchain in play, the Go compiler emits a fully
+# static binary for any GOOS/GOARCH pair without needing a cross-linker.
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -o /out/chaos-buddy \
+    ./cmd/chaos-buddy
+
+# ---------------------------------------------------------------------------
+# Final
+# ---------------------------------------------------------------------------
+# distroless/static-debian12:nonroot ships no shell, no package manager, and
+# no libc -- just CA certs, tzdata, and a passwd entry for uid/gid 65532. See
+# docs/adr/0005 for the base-image choice, made for buddy-api and reused
+# here for the same reasons: a smaller attack surface than anything with a
+# shell a compromised container could exec into -- doubly relevant for a
+# workload whose entire job is deleting other pods.
+#
+# This stage contains no RUN instruction, only a COPY of an
+# already-cross-compiled binary, so nothing built for the target
+# architecture ever executes during the build -- no QEMU/binfmt handler
+# needed for the multi-arch build in CI.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/sean-kramer/k8s-buddy" \
+      org.opencontainers.image.title="chaos-buddy" \
+      org.opencontainers.image.description="K8s Buddy's controlled failure injector -- deletes or flaps the readiness of one pod at a time, gated by a kill switch, a dry-run default, and narrowly-scoped RBAC." \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY --from=builder /out/chaos-buddy /chaos-buddy
+
+USER 65532:65532
+
+# /metrics and /healthz only -- chaos-buddy never proxies or terminates any
+# user-facing traffic.
+EXPOSE 8080
+
+ENTRYPOINT ["/chaos-buddy"]

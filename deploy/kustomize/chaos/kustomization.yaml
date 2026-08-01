@@ -1,0 +1,40 @@
+# chaos-buddy deploys into k8s-buddy-plants -- the same namespace as the
+# Plants it targets -- but does NOT create that namespace itself.
+# deploy/kustomize/plants/namespace.yaml already owns it (PSA `restricted`
+# labels included), and `make deploy-chaos` applies that kustomization
+# first as a prerequisite. A second namespace.yaml here would either
+# duplicate that definition (drifting the moment one of the two copies is
+# edited) or, if kustomize's admin ever applied this directory alone
+# first, silently create the namespace WITHOUT its PSA labels.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k8s-buddy-plants
+
+resources:
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
+
+# The `dev` default matches the second tag `make docker-build-chaos`/
+# `make kind-load-chaos` produce, so this directory is still directly
+# appliable on its own. `make deploy-chaos` overrides it with the
+# immutable short git SHA of the image it just built, through a generated
+# throwaway overlay -- same reasoning as deploy/kustomize/base/
+# kustomization.yaml's own `images:` comment for why a mutable tag is
+# wrong for that target specifically (a rebuild with no tag change would
+# never trigger a rollout).
+images:
+  - name: ghcr.io/sean-kramer/k8s-buddy/chaos-buddy
+    newTag: dev
+
+# app.kubernetes.io/part-of and app.kubernetes.io/managed-by are already
+# set explicitly on every object above; this just adds the same two
+# cluster-identifying labels kustomize itself is responsible for,
+# confirming `managed-by: kustomize` end to end -- mirrors
+# deploy/kustomize/base/kustomization.yaml's own `labels:` block exactly.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

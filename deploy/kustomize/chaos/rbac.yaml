@@ -1,0 +1,114 @@
+# chaos-buddy's entire identity and authority. A reviewer auditing this
+# project's security posture is expected to open this file specifically --
+# everything below is written for that reading, not just for `kubectl
+# apply`.
+#
+# Three objects, three narrow grants, nothing else:
+#
+#   1. A dedicated ServiceAccount (chaos-buddy) -- no workload shares an
+#      identity with this one, so its Role can never be broader than this
+#      one process's actual needs just to also satisfy some other pod.
+#   2. A namespaced Role (NOT a ClusterRole) in k8s-buddy-plants only.
+#      chaos-buddy cannot be granted this Role in any other namespace
+#      without a second, separately-reviewed RoleBinding -- there is no
+#      cluster-wide grant anywhere in this file.
+#   3. A RoleBinding tying the two together, in the same namespace as both.
+#
+# The Role's rules, and why each one is as narrow as it can be while still
+# letting chaos-buddy do its job:
+#
+#   - pods: list, delete. This is the one genuinely destructive grant, and
+#     it is exactly what the platform plan asks for: "list and delete on
+#     pods ONLY, in one namespace." No "get" (chaos-buddy never fetches a
+#     single named pod -- CHAOS_LABEL_SELECTOR always drives a List), no
+#     "watch", no "patch", no "create". A pod's readiness is flipped over
+#     HTTP directly to the pod (ModeReadinessFlap; see internal/chaos/
+#     kube.go's FlapReadiness), never via the Kubernetes API, so this rule
+#     never needed a "patch" or "update" verb on pods to support it.
+#   - configmaps: get, and ONLY on the one object named by
+#     CHAOS_CONFIGMAP_NAME's default (chaos-buddy-switch,
+#     see configmap.yaml). The `resourceNames` restriction below is the
+#     point: even a fully compromised chaos-buddy process cannot read any
+#     OTHER ConfigMap in this namespace, including ones with real secrets-
+#     adjacent configuration in them. If CHAOS_CONFIGMAP_NAME is ever
+#     changed away from "chaos-buddy-switch", this resourceNames list must
+#     be updated to match, or the kill switch read starts failing --
+#     which, per SwitchPermits's fail-closed design (internal/chaos/
+#     engine.go), means chaos stops rather than silently running
+#     unconfirmed. A misconfiguration here fails safe.
+#   - events: create only. Required so every action leaves a Kubernetes
+#     Event on its target pod (`kubectl describe pod` tells the story
+#     without needing chaos-buddy's own logs). No "patch", so chaos-buddy
+#     cannot rewrite or merge an existing Event -- every action creates a
+#     brand new one (see kube.go's EmitEvent, which always uses
+#     GenerateName).
+#
+# What is explicitly, deliberately absent: secrets (no verb, on any
+# resource, ever touches them), deployments/replicasets/statefulsets (this
+# tool kills PODS, never anything that owns them -- it has no way to scale
+# or reschedule anything), services, networkpolicies, and anything
+# cluster-scoped (nodes, namespaces, ClusterRoles, CustomResourceDefinitions,
+# Plants). `kubectl auth can-i` against any of those, or against any other
+# namespace, must return "no" -- see the task report for the exact
+# transcript this was verified against.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chaos-buddy
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chaos-buddy-role
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["chaos-buddy-switch"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+# A namespaced RoleBinding, not a ClusterRoleBinding -- binding
+# chaos-buddy-role only within k8s-buddy-plants, the one namespace it names
+# throughout. Unlike plant-operator-rolebinding (config/rbac/role_binding.yaml),
+# which must be cluster-scoped because it binds a ClusterRole for an
+# operator that watches every namespace, chaos-buddy watches exactly one
+# namespace by design (CHAOS_TARGET_NAMESPACE), so its binding is scoped to
+# match.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chaos-buddy-rolebinding
+  namespace: k8s-buddy-plants
+  labels:
+    app.kubernetes.io/name: chaos-buddy
+    app.kubernetes.io/instance: chaos-buddy
+    app.kubernetes.io/component: chaos
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chaos-buddy-role
+subjects:
+  - kind: ServiceAccount
+    name: chaos-buddy
+    namespace: k8s-buddy-plants
