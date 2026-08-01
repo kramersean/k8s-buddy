@@ -1,7 +1,7 @@
 // Package controller implements the plant-operator's reconciliation logic:
-// turning a Plant into the Deployment, Service, ConfigMap, and
-// PodDisruptionBudget it should own, and keeping those children in sync with
-// its spec.
+// turning a Plant into the Deployment, Service, ConfigMap,
+// PodDisruptionBudget, and ServiceAccount it should own, and keeping those
+// children in sync with its spec.
 //
 // This file (resources.go) contains only the "desired state" builders: pure
 // functions from a *Plant to the child object it implies. There is no
@@ -170,6 +170,16 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					// Named explicitly after the Plant (ServiceAccountFor
+					// builds the object itself) rather than left unset,
+					// which would silently bind these Pods to the
+					// namespace's own "default" ServiceAccount instead.
+					// AutomountServiceAccountToken: false below still
+					// means no token is ever mounted — these workload
+					// pods call nothing in the Kubernetes API — but
+					// naming the account is what makes that a stated
+					// posture rather than an inherited default.
+					ServiceAccountName: p.Name,
 					// No token for these workload pods to use — they call
 					// nothing in the Kubernetes API.
 					AutomountServiceAccountToken: ptr.To(false),
@@ -323,6 +333,31 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 				},
 			},
 		},
+	}
+}
+
+// ServiceAccountFor builds the ServiceAccount a Plant's Pods run under: named
+// exactly p.Name, in p.Namespace, with AutomountServiceAccountToken set to
+// false. It does not set an owner reference — see DeploymentFor's comment for
+// why.
+//
+// The workload gets zero API access either way — DeploymentFor's pod spec
+// also sets AutomountServiceAccountToken: false, so no token is mounted even
+// if this ServiceAccount's own setting were somehow bypassed — but naming the
+// account explicitly, rather than leaving DeploymentFor's pod spec to
+// silently inherit the namespace's "default" ServiceAccount, is the point:
+// this manifest states its posture ("this workload has been given its own
+// identity, and that identity carries no token") instead of leaving a reader
+// to infer it from an absence. See config/rbac/role.yaml's own comment for
+// the contrasting operator-pod posture, which does need its token mounted.
+func ServiceAccountFor(p *buddyv1alpha1.Plant) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Labels:    LabelsFor(p),
+		},
+		AutomountServiceAccountToken: ptr.To(false),
 	}
 }
 

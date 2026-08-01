@@ -62,9 +62,9 @@ const (
 )
 
 // PlantReconciler reconciles a Plant object: it drives the generated
-// Deployment, Service, ConfigMap, and PodDisruptionBudget toward the state
-// resources.go's builders describe, and reports their aggregate health back
-// onto Plant.status.
+// Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount
+// toward the state resources.go's builders describe, and reports their
+// aggregate health back onto Plant.status.
 type PlantReconciler struct {
 	client.Client
 	// Scheme is used to set the controller owner reference on every child
@@ -83,6 +83,7 @@ type PlantReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=create;get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile drives a single Plant toward its desired state. See the file
@@ -130,7 +131,7 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 	if created {
-		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantCreated, "created Deployment, Service, ConfigMap, and PodDisruptionBudget")
+		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantCreated, "created Deployment, Service, ConfigMap, PodDisruptionBudget, and ServiceAccount")
 	} else if updated {
 		r.Recorder.Event(plant, corev1.EventTypeNormal, eventPlantUpdated, "corrected drift on one or more owned children")
 	}
@@ -159,9 +160,9 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // is set: it emits the PlantDeleting event, logs, and removes the
 // finalizer so the API server can complete the delete.
 //
-// It deliberately does NOT delete the Deployment, Service, ConfigMap, or
-// PodDisruptionBudget by hand. Every one of them carries a controller owner
-// reference back to this Plant (set in reconcileChildren via
+// It deliberately does NOT delete the Deployment, Service, ConfigMap,
+// PodDisruptionBudget, or ServiceAccount by hand. Every one of them carries a
+// controller owner reference back to this Plant (set in reconcileChildren via
 // controllerutil.SetControllerReference), and Kubernetes' own garbage
 // collector removes owned objects automatically once their owner is gone.
 // Deleting them here would be redundant at best; at worst, doing it
@@ -188,10 +189,11 @@ func (r *PlantReconciler) reconcileDelete(ctx context.Context, plant *buddyv1alp
 	return ctrl.Result{}, nil
 }
 
-// reconcileChildren applies the Deployment, Service, ConfigMap, and
-// PodDisruptionBudget resources.go's builders describe for plant, setting a
-// controller owner reference on each so Kubernetes garbage collection can
-// find them later. It returns the (now-current) Deployment for status.go's
+// reconcileChildren applies the Deployment, Service, ConfigMap,
+// PodDisruptionBudget, and ServiceAccount resources.go's builders describe
+// for plant, setting a controller owner reference on each so Kubernetes
+// garbage collection can find them later. It returns the (now-current)
+// Deployment for status.go's
 // computeStatus to read, plus whether any child was newly created or
 // updated so Reconcile can decide which Event, if any, to emit.
 //
@@ -253,6 +255,15 @@ func (r *PlantReconciler) reconcileChildren(ctx context.Context, plant *buddyv1a
 	})
 	if err != nil {
 		return nil, false, false, fmt.Errorf("reconciling poddisruptionbudget for plant %s/%s: %w", plant.Namespace, plant.Name, err)
+	}
+	note(op)
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: objectMeta(plant.Name, plant.Namespace)}
+	op, err = controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
+		return r.mutateServiceAccount(plant, serviceAccount)
+	})
+	if err != nil {
+		return nil, false, false, fmt.Errorf("reconciling serviceaccount for plant %s/%s: %w", plant.Namespace, plant.Name, err)
 	}
 	note(op)
 
@@ -438,6 +449,28 @@ func (r *PlantReconciler) mutatePodDisruptionBudget(plant *buddyv1alpha1.Plant, 
 	return nil
 }
 
+// mutateServiceAccount sets serviceAccount's fields to those
+// ServiceAccountFor(plant) describes, owning Labels and
+// AutomountServiceAccountToken only. This is deliberately narrow — a
+// ServiceAccount carries no other fields resources.go's builder generates —
+// but is written the same way as every other mutate* function in this file
+// for consistency: assign only the fields the operator owns, never the whole
+// object, so a field this operator doesn't generate any values for (e.g. a
+// Secret reference a human or another controller has attached) survives the
+// next reconcile.
+func (r *PlantReconciler) mutateServiceAccount(plant *buddyv1alpha1.Plant, serviceAccount *corev1.ServiceAccount) error {
+	desired := ServiceAccountFor(plant)
+
+	if err := controllerutil.SetControllerReference(plant, serviceAccount, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on serviceaccount: %w", err)
+	}
+
+	serviceAccount.Labels = mergeLabels(serviceAccount.Labels, desired.Labels)
+	serviceAccount.AutomountServiceAccountToken = desired.AutomountServiceAccountToken
+
+	return nil
+}
+
 // reconcileStatus computes plant's new status from deployment and writes it
 // through the status subresource, but only when something other than
 // LastWatered actually changed.
@@ -503,10 +536,10 @@ func conditionTrue(conditions []metav1.Condition, conditionType string) bool {
 }
 
 // SetupWithManager wires PlantReconciler into mgr: it reconciles on changes
-// to Plant itself, plus any change to a Deployment, Service, ConfigMap, or
-// PodDisruptionBudget that this reconciler owns, so drift a human (or
-// another controller) introduces on a child gets corrected without waiting
-// for the next WateringInterval.
+// to Plant itself, plus any change to a Deployment, Service, ConfigMap,
+// PodDisruptionBudget, or ServiceAccount that this reconciler owns, so drift
+// a human (or another controller) introduces on a child gets corrected
+// without waiting for the next WateringInterval.
 func (r *PlantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&buddyv1alpha1.Plant{}).
@@ -514,6 +547,7 @@ func (r *PlantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&corev1.ServiceAccount{}).
 		Named("plant").
 		Complete(r)
 }

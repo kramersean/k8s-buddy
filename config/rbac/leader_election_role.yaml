@@ -1,0 +1,39 @@
+# Leader election permissions, scoped to a namespaced Role -- not a
+# ClusterRole -- because the Lease this operator's leader election creates
+# and contends over (named "plant-operator.buddy.k8s-buddy.io", per
+# cmd/plant-operator/main.go's LeaderElectionID) always lives in the
+# operator's own namespace (k8s-buddy-system). There is no reason for this
+# permission to reach any other namespace's leases, so it doesn't.
+#
+# Only coordination.k8s.io/leases is listed: controller-runtime's leader
+# election has used Lease-based locking exclusively (never the older
+# ConfigMap-based lock) since well before the v0.24 release this project
+# pins, so a ConfigMap rule here would be dead permission granted for a code
+# path this operator's dependency version cannot take. Events (which
+# controller-runtime's leader election also records, e.g. on acquiring or
+# losing the lease) are already covered cluster-wide by plant-operator-role's
+# own events rule (config/rbac/role.yaml) -- this file doesn't repeat it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: plant-operator-leader-election-role
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete

@@ -388,7 +388,7 @@ func waitForFinalizer(t *testing.T, plant *buddyv1alpha1.Plant) {
 	}, 10*time.Second, 100*time.Millisecond, "finalizer was never added to plant %s", key)
 }
 
-// waitForChildrenExist polls until all four of plant's children exist.
+// waitForChildrenExist polls until all five of plant's children exist.
 func waitForChildrenExist(t *testing.T, plant *buddyv1alpha1.Plant) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -407,6 +407,9 @@ func childrenExist(plant *buddyv1alpha1.Plant) bool {
 		return false
 	}
 	if err := testClient.Get(testCtx, client.ObjectKey{Namespace: plant.Namespace, Name: plant.Name + "-pdb"}, &policyv1.PodDisruptionBudget{}); err != nil {
+		return false
+	}
+	if err := testClient.Get(testCtx, client.ObjectKey{Namespace: plant.Namespace, Name: plant.Name}, &corev1.ServiceAccount{}); err != nil {
 		return false
 	}
 	return true

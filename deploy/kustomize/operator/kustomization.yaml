@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# k8s-buddy-system only applies to the resources below that are actually
+# namespaced -- the ClusterRole and ClusterRoleBinding in config/rbac/
+# (role.yaml, role_binding.yaml) have no namespace and are left alone, which
+# is correct: a ClusterRole's permissions are cluster-wide by definition, and
+# giving it a namespace field would be a validation error, not a scoping
+# change.
+namespace: k8s-buddy-system
+
+resources:
+  - namespace.yaml
+  - ../../../config/rbac
+  - deployment.yaml
+
+# See deploy/kustomize/base/kustomization.yaml's own comment for why this
+# exists at all: `make deploy-operator` overrides newTag with the immutable
+# short git SHA of the image it just built, so a stale, byte-identical
+# PodSpec (and the silent no-rollout it produces) can never happen here
+# either. `dev` is what a bare `kubectl apply -k deploy/kustomize/operator`
+# gets, matching the second tag `make docker-build-operator`/
+# `make kind-load-operator` produce.
+images:
+  - name: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+    newTag: dev
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

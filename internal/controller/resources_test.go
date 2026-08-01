@@ -244,6 +244,8 @@ func TestDeploymentFor(t *testing.T) {
 
 	podSpec := dep.Spec.Template.Spec
 
+	require.Equal(t, "fernie", podSpec.ServiceAccountName)
+
 	require.NotNil(t, podSpec.AutomountServiceAccountToken)
 	require.False(t, *podSpec.AutomountServiceAccountToken)
 
@@ -404,6 +406,25 @@ func TestDeterminism(t *testing.T) {
 	require.Equal(t, controller.ServiceFor(p), controller.ServiceFor(p))
 	require.Equal(t, controller.ConfigMapFor(p), controller.ConfigMapFor(p))
 	require.Equal(t, controller.PodDisruptionBudgetFor(p), controller.PodDisruptionBudgetFor(p))
+	require.Equal(t, controller.ServiceAccountFor(p), controller.ServiceAccountFor(p))
 	require.Equal(t, controller.LabelsFor(p), controller.LabelsFor(p))
 	require.Equal(t, controller.SelectorFor(p), controller.SelectorFor(p))
+}
+
+// TestServiceAccountFor is the fifth child (carried from Task 2's review):
+// named after the Plant, in its namespace, standard labels, and no
+// automounted token -- the workload's DeploymentFor references this exact
+// object by name (see TestDeploymentFor's ServiceAccountName assertion), so
+// the two must agree.
+func TestServiceAccountFor(t *testing.T) {
+	t.Parallel()
+
+	p := testPlant()
+	sa := controller.ServiceAccountFor(p)
+
+	require.Equal(t, "fernie", sa.Name)
+	require.Equal(t, "k8s-buddy", sa.Namespace)
+	require.Equal(t, controller.LabelsFor(p), sa.Labels)
+	require.NotNil(t, sa.AutomountServiceAccountToken)
+	require.False(t, *sa.AutomountServiceAccountToken)
 }

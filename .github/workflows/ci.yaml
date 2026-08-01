@@ -91,6 +91,23 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
+      # The envtest controller suite (internal/controller/{suite,
+      # plant_controller,counting_client}_test.go) is gated behind the
+      # "envtest" build tag specifically so `make test` above stays fast and
+      # dependency-free -- but that means it runs NOWHERE automatically
+      # unless something in CI calls `make test-envtest` explicitly, which is
+      # exactly what this step does. `make test-envtest` installs the pinned
+      # setup-envtest into .tools/ (Makefile's own pinned-tool pattern) and
+      # uses it to download the matching 1.36.x kube-apiserver/etcd/kubectl
+      # binaries on first run, then boots a real control plane against them.
+      # ubuntu-latest is used for the whole `test` job (not the Windows dev
+      # box) specifically because it has a C toolchain for test-race above,
+      # and because Windows cannot cleanly signal etcd.exe/kube-apiserver.exe
+      # for teardown -- see suite_test.go's own comments for why that
+      # matters locally but is a non-issue here.
+      - name: make test-envtest
+        run: make test-envtest
+
   # ---------------------------------------------------------------------------
   # build -- multi-arch image build. Pushing to ghcr.io only happens on a
   # push to main; a PR (including one from a fork) never gets push:true, so
@@ -252,6 +269,13 @@ jobs:
           kubectl kustomize deploy/kustomize/base | \
             kubeconform -strict -summary -kubernetes-version 1.36.1 -
 
+      - name: Validate deploy/kustomize/operator (strict, real k8s schemas)
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/kustomize/operator | \
+            kubeconform -strict -summary -kubernetes-version 1.36.1 -
+
   # ---------------------------------------------------------------------------
   # e2e -- the important one. Stands up the same 3-node kind topology CI and
   # local dev both use, deploys buddy-api, and runs hack/demo.sh as a real
@@ -298,16 +322,136 @@ jobs:
       - name: Run self-healing demo (chaos + recovery assertion)
         run: bash hack/demo.sh
 
+      # ---------------------------------------------------------------------
+      # Plan 2: the operator, exercised end to end on the same live cluster
+      # the Plan 1 demo above just proved buddy-api on. This installs the
+      # Plant CRD, builds and deploys plant-operator, applies the fernie
+      # sample, and -- the headline result of Plan 2 -- deletes the Plant and
+      # asserts every one of its five owned children is actually gone.
+      # envtest (internal/controller's suite, run in the `test` job) cannot
+      # demonstrate cascading garbage collection at all: it runs no garbage-
+      # collector controller. This is the only place in CI that can.
+      # ---------------------------------------------------------------------
+
+      - name: make install-crd
+        run: make install-crd
+
+      - name: make docker-build-operator
+        run: make docker-build-operator
+
+      - name: make kind-load-operator
+        run: make kind-load-operator
+
+      - name: make deploy-operator
+        run: make deploy-operator
+
+      - name: Operator pod is Running and Ready
+        run: |
+          set -euo pipefail
+          kubectl -n k8s-buddy-system wait --for=condition=Available deployment/plant-operator --timeout=120s
+          kubectl -n k8s-buddy-system get pods -o wide
+
+      - name: Apply the fernie Plant sample
+        run: kubectl apply -f config/samples/plant-fernie.yaml
+
+      - name: Wait for the operator to report all replicas ready
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            desired="$(kubectl get plant fernie -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+            ready="$(kubectl get plant fernie -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+            if [ -n "$desired" ] && [ -n "$ready" ] && [ "$ready" = "$desired" ]; then
+              echo "fernie ready: readyReplicas=$ready desiredReplicas=$desired"
+              exit 0
+            fi
+            echo "waiting for fernie: readyReplicas=${ready:-<unset>} desiredReplicas=${desired:-<unset>} (attempt $i/60)"
+            sleep 5
+          done
+          echo "fernie never reached status.readyReplicas == spec.replicas" >&2
+          exit 1
+
+      - name: Assert kubectl get plants shows a non-empty MOOD
+        run: |
+          set -euo pipefail
+          kubectl get plants
+          mood="$(kubectl get plant fernie -o jsonpath='{.status.mood}')"
+          if [ -z "$mood" ]; then
+            echo "status.mood is empty; expected a populated Mood" >&2
+            exit 1
+          fi
+          echo "fernie mood: $mood"
+
+      - name: Curl fernie's Service and confirm /status responds
+        run: |
+          set -euo pipefail
+          kubectl run curl-fernie --image=curlimages/curl:8.11.1 --restart=Never --rm -i \
+            --command -- curl -sf --max-time 5 http://fernie.default.svc.cluster.local/status
+
+      - name: Children exist before deletion (the "before" half of the GC proof)
+        run: kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie
+
+      # THE GARBAGE COLLECTION PROOF. This is what envtest structurally
+      # cannot show (no garbage-collector controller runs there) and the
+      # reason Task 5 exists as a live-cluster task at all.
+      - name: Delete the Plant and assert all five children are garbage-collected
+        run: |
+          set -euo pipefail
+          kubectl delete plant fernie --wait=true --timeout=60s
+          for i in $(seq 1 30); do
+            remaining="$(kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie --no-headers 2>/dev/null | wc -l)"
+            if [ "$remaining" -eq 0 ]; then
+              echo "all five children garbage-collected"
+              exit 0
+            fi
+            echo "waiting for garbage collection: $remaining child object(s) remaining (attempt $i/30)"
+            sleep 2
+          done
+          echo "one or more owned children survived Plant deletion:" >&2
+          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie >&2 || true
+          exit 1
+
+      - name: RBAC is actually scoped (plant-operator must NOT be able to touch nodes or secrets)
+        run: |
+          set -euo pipefail
+          if kubectl auth can-i --as=system:serviceaccount:k8s-buddy-system:plant-operator delete nodes | grep -qx yes; then
+            echo "plant-operator can delete nodes -- RBAC is not scoped" >&2
+            exit 1
+          fi
+          if kubectl auth can-i --as=system:serviceaccount:k8s-buddy-system:plant-operator get secrets -A | grep -qx yes; then
+            echo "plant-operator can read secrets cluster-wide -- RBAC is not scoped" >&2
+            exit 1
+          fi
+          if ! kubectl auth can-i --as=system:serviceaccount:k8s-buddy-system:plant-operator update plants/status -n k8s-buddy | grep -qx yes; then
+            echo "plant-operator cannot update plants/status in its own working namespace -- RBAC is too narrow" >&2
+            exit 1
+          fi
+          echo "RBAC scoping confirmed: no nodes, no cluster-wide secrets, yes plants/status"
+
       - name: Dump diagnostics on failure
         if: failure()
         run: |
-          echo "=== pods ==="
+          echo "=== buddy-api pods ==="
           kubectl -n k8s-buddy get pods -o wide || true
-          echo "=== describe pods ==="
+          echo "=== describe buddy-api pods ==="
           kubectl -n k8s-buddy describe pods -l app.kubernetes.io/name=buddy-api || true
-          echo "=== logs (current) ==="
+          echo "=== buddy-api logs (current) ==="
           kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 || true
-          echo "=== logs (previous, if any container restarted) ==="
+          echo "=== buddy-api logs (previous, if any container restarted) ==="
           kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 --previous || true
-          echo "=== events ==="
+          echo "=== buddy-api events ==="
           kubectl -n k8s-buddy get events --sort-by=.lastTimestamp || true
+          echo "=== plant-operator pods ==="
+          kubectl -n k8s-buddy-system get pods -o wide || true
+          echo "=== describe plant-operator pods ==="
+          kubectl -n k8s-buddy-system describe pods -l app.kubernetes.io/name=plant-operator || true
+          echo "=== plant-operator logs ==="
+          kubectl -n k8s-buddy-system logs deploy/plant-operator --all-containers --tail=500 || true
+          echo "=== plant-operator events ==="
+          kubectl -n k8s-buddy-system get events --sort-by=.lastTimestamp || true
+          echo "=== fernie Plant ==="
+          kubectl get plant fernie -o yaml || true
+          kubectl describe plant fernie || true
+          echo "=== fernie's owned children (if any remain) ==="
+          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie -o wide || true
+          echo "=== default namespace events ==="
+          kubectl get events -n default --sort-by=.lastTimestamp || true

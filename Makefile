@@ -33,14 +33,20 @@ SETUP_ENVTEST           := $(TOOLS_DIR)/setup-envtest$(GOEXE)
 ENVTEST_K8S_VERSION     := 1.36.2
 
 # Where controller-gen's `object` (deepcopy) and `crd`/`rbac` generators look
-# for +kubebuilder markers, and where the CRD generator writes its output.
-# ./api/... itself has no .go files directly (only its v1alpha1 subpackage
-# does), and controller-gen v0.21's loader errors on an empty root rather
-# than skipping it, so this points at the package directly. It gains a
-# second, space-separated path in Task 5 once +kubebuilder:rbac markers
-# exist on internal/controller's reconciler.
-API_DIRS := ./api/v1alpha1/...
-CRD_DIR  := config/crd/bases
+# for +kubebuilder markers, and where the CRD/RBAC generators write their
+# output. ./api/... itself has no .go files directly (only its v1alpha1
+# subpackage does), and controller-gen v0.21's loader errors on an empty root
+# rather than skipping it, so this points at the package directly.
+# ./internal/controller/... is included from Task 5 onward, once
+# +kubebuilder:rbac markers exist on the reconciler; `generate` (the
+# deepcopy generator) only ever needs api/v1alpha1, but sharing one
+# MANIFEST_DIRS var for both crd and rbac generation in the `manifests`
+# target below keeps a single combined controller-gen invocation possible.
+API_DIRS      := ./api/v1alpha1/...
+MANIFEST_DIRS := ./api/v1alpha1/... ./internal/controller/...
+CRD_DIR       := config/crd/bases
+RBAC_DIR      := config/rbac
+RBAC_ROLE_NAME := plant-operator-role
 
 GIT_SHA  := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 COMMIT   := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -51,9 +57,20 @@ IMAGE_NAME   := buddy-api
 IMAGE        := $(IMAGE_PREFIX)/$(IMAGE_NAME):$(GIT_SHA)
 IMAGE_DEV    := $(IMAGE_PREFIX)/$(IMAGE_NAME):dev
 
+OPERATOR_IMAGE_NAME := plant-operator
+OPERATOR_IMAGE       := $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME):$(GIT_SHA)
+OPERATOR_IMAGE_DEV    := $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME):dev
+
 KIND         := kind
 KIND_CLUSTER := k8s-buddy
 KIND_CONFIG  := deploy/kind/kind-config.yaml
+
+# The tracked kustomization the operator deploy targets render through a
+# generated, throwaway overlay -- same reasoning as $(DEPLOY_BUILD_DIR)
+# below for buddy-api's own base: pin the immutable git SHA without ever
+# dirtying deploy/kustomize/operator/kustomization.yaml.
+OPERATOR_BASE      := deploy/kustomize/operator
+OPERATOR_BUILD_DIR := $(BUILD_DIR)/operator
 
 # The tracked kustomization the `deploy` target renders through a generated,
 # throwaway overlay so it can pin an immutable image tag without ever
@@ -112,9 +129,20 @@ generate: $(CONTROLLER_GEN) ## Regenerate zz_generated.deepcopy.go for every +ku
 	$(CONTROLLER_GEN) object paths="$(API_DIRS)"
 
 .PHONY: manifests
-manifests: $(CONTROLLER_GEN) ## Regenerate the CRD manifests under config/crd/bases (and, later, RBAC) from +kubebuilder markers
-	@mkdir -p $(CRD_DIR)
-	$(CONTROLLER_GEN) crd paths="$(API_DIRS)" output:crd:artifacts:config=$(CRD_DIR)
+# A single combined controller-gen invocation, not two separate ones: crd and
+# rbac are independent generators reading independent marker types
+# (+kubebuilder:validation:*/+kubebuilder:object:* for crd,
+# +kubebuilder:rbac:* for rbac) from the same $(MANIFEST_DIRS), so one
+# invocation covering both is both faster and the pattern kubebuilder's own
+# scaffolded Makefile uses. config/rbac/role.yaml is therefore GENERATED --
+# never hand-edit it; fix the +kubebuilder:rbac markers on
+# internal/controller/plant_controller.go and re-run this target instead.
+manifests: $(CONTROLLER_GEN) ## Regenerate config/crd/bases and config/rbac/role.yaml from +kubebuilder markers
+	@mkdir -p $(CRD_DIR) $(RBAC_DIR)
+	$(CONTROLLER_GEN) crd rbac:roleName=$(RBAC_ROLE_NAME) \
+		$(foreach d,$(MANIFEST_DIRS),paths="$(d)") \
+		output:crd:artifacts:config=$(CRD_DIR) \
+		output:rbac:artifacts:config=$(RBAC_DIR)
 
 .PHONY: test
 # The envtest controller suite (internal/controller/{suite,plant_controller,
@@ -202,6 +230,16 @@ docker-build: ## Build the buddy-api container image, tagged with the short git 
 		-t $(IMAGE_DEV) \
 		.
 
+.PHONY: docker-build-operator
+docker-build-operator: ## Build the plant-operator container image, tagged with the short git SHA and :dev
+	docker build \
+		-f build/Dockerfile.plant-operator \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		-t $(OPERATOR_IMAGE) \
+		-t $(OPERATOR_IMAGE_DEV) \
+		.
+
 .PHONY: kind-up
 kind-up: ## Create the kind cluster (k8s-buddy) if it does not already exist
 	@if $(KIND) get clusters 2>/dev/null | grep -qx '$(KIND_CLUSTER)'; then \
@@ -217,6 +255,18 @@ kind-down: ## Delete the kind cluster (k8s-buddy), succeeding even if it does no
 .PHONY: kind-load
 kind-load: ## Load the built buddy-api image (SHA tag and :dev) into the kind cluster (k8s-buddy)
 	$(KIND) load docker-image $(IMAGE) $(IMAGE_DEV) --name $(KIND_CLUSTER)
+
+.PHONY: kind-load-operator
+kind-load-operator: ## Load the built plant-operator image (SHA tag and :dev) into the kind cluster (k8s-buddy)
+	$(KIND) load docker-image $(OPERATOR_IMAGE) $(OPERATOR_IMAGE_DEV) --name $(KIND_CLUSTER)
+
+.PHONY: install-crd
+install-crd: manifests ## Apply the generated Plant CRD (config/crd/bases) to the current kubectl context
+	kubectl apply -f $(CRD_DIR)
+
+.PHONY: uninstall-crd
+uninstall-crd: ## Remove the Plant CRD from the current kubectl context (also deletes every Plant on the cluster)
+	kubectl delete -f $(CRD_DIR) --ignore-not-found
 
 # `deploy` never applies the base directly. The base's images: transformer
 # defaults to the MUTABLE :dev tag, and applying a mutable tag after a
@@ -257,6 +307,31 @@ deploy: ## Apply the Kubernetes manifests, pinning the image to the immutable gi
 .PHONY: undeploy
 undeploy: ## Remove the Kubernetes manifests (deploy/kustomize/base) from the current kubectl context
 	kubectl delete -k deploy/kustomize/base --ignore-not-found
+
+# Same immutable-tag reasoning as `deploy` above, applied to the operator's
+# own image: an operator Deployment left pointing at a mutable :dev tag would
+# silently keep running a stale binary after a rebuild for exactly the same
+# reason buddy-api's own deploy target avoids it.
+.PHONY: deploy-operator
+deploy-operator: install-crd ## Apply the operator's RBAC and Deployment (deploy/kustomize/operator), pinning the image to the immutable git SHA
+	@mkdir -p $(OPERATOR_BUILD_DIR)
+	@printf '%s\n' \
+		'# Generated by `make deploy-operator`. Do not edit; do not commit.' \
+		'apiVersion: kustomize.config.k8s.io/v1beta1' \
+		'kind: Kustomization' \
+		'resources:' \
+		'  - ../../$(OPERATOR_BASE)' \
+		'images:' \
+		'  - name: $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME)' \
+		'    newTag: $(GIT_SHA)' \
+		> $(OPERATOR_BUILD_DIR)/kustomization.yaml
+	@echo "deploy-operator: pinning $(IMAGE_PREFIX)/$(OPERATOR_IMAGE_NAME) to tag $(GIT_SHA)"
+	kubectl apply -k $(OPERATOR_BUILD_DIR)
+	kubectl -n k8s-buddy-system rollout status deployment/plant-operator --timeout=120s
+
+.PHONY: undeploy-operator
+undeploy-operator: ## Remove the operator's RBAC and Deployment (deploy/kustomize/operator) from the current kubectl context
+	kubectl delete -k deploy/kustomize/operator --ignore-not-found
 
 .PHONY: status
 status: ## Show buddy-api pods/services/PDB and rollout status in the k8s-buddy namespace

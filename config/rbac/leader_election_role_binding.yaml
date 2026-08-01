@@ -1,0 +1,23 @@
+# Binds leader_election_role.yaml's namespaced Role to the operator's
+# ServiceAccount, via a namespaced RoleBinding (not a ClusterRoleBinding --
+# the Role itself is namespaced, and a RoleBinding is the only kind that can
+# reference one).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: plant-operator-leader-election-rolebinding
+  namespace: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: plant-operator-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: plant-operator
+    namespace: k8s-buddy-system

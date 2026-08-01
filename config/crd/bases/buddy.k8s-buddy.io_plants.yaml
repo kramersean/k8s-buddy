@@ -211,8 +211,12 @@ spec:
                 type: integer
               lastWatered:
                 description: |-
-                  LastWatered is the timestamp of the most recent successful reconcile,
-                  updated whether or not that reconcile changed anything.
+                  LastWatered is the timestamp of the most recent reconcile that
+                  changed status. The operator computes a fresh value on every
+                  reconcile, but only writes status — including this field — through
+                  the status subresource when something other than the timestamp
+                  itself actually changed, so a Plant with nothing new to report does
+                  not receive a write merely because a WateringInterval elapsed.
                 format: date-time
                 type: string
               mood:

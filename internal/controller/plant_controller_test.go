@@ -22,9 +22,9 @@ import (
 	buddyv1alpha1 "github.com/sean-kramer/k8s-buddy/api/v1alpha1"
 )
 
-// --- case 1: creation owns all four children ----------------------------
+// --- case 1: creation owns all five children ----------------------------
 
-func TestReconcile_CreatesAllFourChildrenWithOwnerReferences(t *testing.T) {
+func TestReconcile_CreatesAllFiveChildrenWithOwnerReferences(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 3)
 	createPlant(t, plant)
@@ -49,6 +49,12 @@ func TestReconcile_CreatesAllFourChildrenWithOwnerReferences(t *testing.T) {
 	pdb := &policyv1.PodDisruptionBudget{}
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie-pdb"}, pdb))
 	assertControllerOwnerRef(t, pdb, owner)
+
+	serviceAccount := &corev1.ServiceAccount{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, serviceAccount))
+	assertControllerOwnerRef(t, serviceAccount, owner)
+	require.NotNil(t, serviceAccount.AutomountServiceAccountToken)
+	require.False(t, *serviceAccount.AutomountServiceAccountToken)
 }
 
 // --- case 2: finalizer added on creation ---------------------------------
@@ -178,7 +184,7 @@ func TestReconcile_DriftCorrection_DeploymentReplicasRestored(t *testing.T) {
 // resourceVersion cannot be trusted here. This lets the Plant settle,
 // resets the counting client's tallies, triggers exactly one more
 // reconcile, and asserts it performed zero Create/Update/Patch calls
-// against all four children AND zero status-subresource writes.
+// against all five children AND zero status-subresource writes.
 func TestReconcile_Idempotence_SteadyStateReconcileWritesNothing(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "idempotent", 3)
@@ -201,7 +207,7 @@ func TestReconcile_Idempotence_SteadyStateReconcileWritesNothing(t *testing.T) {
 	triggerReconcile(t, plant)
 
 	// Sum every GVK the counting client has EVER seen a write against, not
-	// just the four expected children: a write storm on the Plant object
+	// just the five expected children: a write storm on the Plant object
 	// itself (e.g. a finalizer re-add loop) or a write bucketed under some
 	// unexpected GVK would be invisible to a loop that only inspects
 	// childGVKs(). The full map is still printed on failure so a non-zero
@@ -276,6 +282,13 @@ func TestReconcile_Idempotence_CreateOrUpdateReturnsOperationResultNone(t *testi
 	})
 	require.NoError(t, err)
 	require.Equal(t, controllerutil.OperationResultNone, op, "PodDisruptionBudget CreateOrUpdate must be a no-op at steady state")
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: objectMeta(fresh.Name, fresh.Namespace)}
+	op, err = controllerutil.CreateOrUpdate(testCtx, testClient, serviceAccount, func() error {
+		return reconciler.mutateServiceAccount(fresh, serviceAccount)
+	})
+	require.NoError(t, err)
+	require.Equal(t, controllerutil.OperationResultNone, op, "ServiceAccount CreateOrUpdate must be a no-op at steady state")
 }
 
 // TestComputeStatus_LastTransitionTimePreservedAcrossNoOpCall is case 5's
@@ -453,6 +466,10 @@ func TestReconcile_DeleteRemovesFinalizerAndOwnerReferencesAreCorrect(t *testing
 	pdb := &policyv1.PodDisruptionBudget{}
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie-pdb"}, pdb))
 	assertControllerOwnerRef(t, pdb, owner)
+
+	serviceAccount := &corev1.ServiceAccount{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "fernie"}, serviceAccount))
+	assertControllerOwnerRef(t, serviceAccount, owner)
 
 	require.NoError(t, testClient.Delete(testCtx, owner))
 

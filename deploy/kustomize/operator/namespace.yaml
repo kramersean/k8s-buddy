@@ -1,0 +1,26 @@
+# Namespace k8s-buddy-system -- deliberately separate from k8s-buddy (where
+# buddy-api's Plants and their generated children live), the same way most
+# kubebuilder-scaffolded operators split "the thing being managed" from "the
+# thing doing the managing." It means `kubectl delete -k deploy/kustomize/base`
+# (undeploying the demo workload) can never accidentally take the operator
+# down with it, and vice versa.
+#
+# Labeled for Pod Security Admission's `restricted` profile, same posture and
+# same reasoning as deploy/kustomize/base/namespace.yaml: the operator's own
+# pod (deployment.yaml) carries the same hardened security context every
+# generated Plant workload does, and must be admissible under `restricted`
+# just the same.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-buddy-system
+  labels:
+    app.kubernetes.io/name: plant-operator
+    app.kubernetes.io/instance: plant-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
