@@ -91,6 +91,25 @@ cluster.
 - There is a genuine, narrow loss: an operator that is down when a Plant is
   deleted has no opportunity to observe that it happened. Nothing this operator
   does needs that opportunity today.
+- **One-time upgrade hazard, stated rather than papered over.** A Plant created
+  by a *previous* build already carries `buddy.k8s-buddy.io/finalizer` in its
+  `metadata.finalizers`, and the new operator will never remove it — that is the
+  whole point of removing the code. Such a Plant is undeletable until the
+  finalizer is stripped by hand:
+
+  ```
+  kubectl patch plant <name> -n <ns> --type=merge -p '{"metadata":{"finalizers":[]}}'
+  ```
+
+  A one-shot migration branch that stripped the legacy string was considered and
+  rejected: it would reintroduce exactly the deletion-path logic this ADR removes,
+  in order to serve a population that is one object on one developer's kind
+  cluster, on a `v1alpha1` API, in a project whose install story is
+  `make demo-operator` on a fresh cluster. The pre-existing Plant on the
+  development cluster was deleted before the new operator was rolled out, which
+  is the correct sequence for any real upgrade too. If this API ever reaches a
+  version with real users, the migration is a conversion webhook's job, not a
+  branch in `Reconcile`.
 - **This decision reverses the moment the operator owns state Kubernetes cannot
   garbage-collect** — a cloud DNS record, an object-storage bucket, a row in an
   external database, a registration with a third-party service. Owner references
