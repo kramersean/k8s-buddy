@@ -39,15 +39,33 @@ package v1alpha1
 // this file uses the one sigs.k8s.io/controller-runtime v0.24.1 (this
 // project's pinned version, see go.mod) does not mark deprecated.
 //
+// The real request order, worth stating precisely because two comments
+// below depend on it: CRD SCHEMA DEFAULTING runs at decode time -- before
+// ANY admission plugin, mutating or validating, ever sees the object --
+// then mutating admission webhooks run, then CRD structural/CEL VALIDATION
+// runs (as part of the object strategy's own Validate, still before
+// validating webhooks), then validating admission webhooks run. In short:
+// default(decode) -> mutate(webhook) -> validate(schema) -> validate(webhook).
+//
 // The two webhooks this file registers:
 //
 //   - PlantCustomDefaulter: a MUTATING webhook filling every unset optional
-//     PlantSpec field. It exists to agree, field for field, with the CRD's
-//     own +kubebuilder:default markers (plant_types.go) -- see
+//     PlantSpec field, agreeing field for field with the CRD's own
+//     +kubebuilder:default markers (plant_types.go) -- see
 //     plant_webhook_test.go's TestDefaultingAgreesWithCRDSchema, which reads
 //     the generated CRD and fails the build the moment the two diverge,
 //     rather than trusting two hand-maintained copies of the same six
-//     values to stay in sync by convention.
+//     values to stay in sync by convention. Given the real order above, this
+//     webhook's own Default() is honestly, almost always, a NO-OP against
+//     real traffic: CRD schema defaulting has already filled every unset
+//     field by the time a mutating webhook ever runs. It still has to exist
+//     and still has to agree exactly -- the task calls for a defaulting
+//     webhook, and the one scenario schema-only defaulting cannot cover
+//     (a Plant constructed directly against a Go client that skips the API
+//     server's decode path entirely, e.g. inside a unit test building a
+//     Plant object in memory) is exactly what TestDefaultingAgreesWithCRDSchema
+//     and TestDefault_LeavesExplicitValuesAlone exercise directly, without a
+//     real request in the loop at all.
 //
 //   - PlantCustomValidator: a VALIDATING webhook rejecting exactly what the
 //     OpenAPI schema (and its CEL rules) cannot express: species immutability
@@ -55,11 +73,10 @@ package v1alpha1
 //     allowlist. It also re-asserts spec.replicas >= 1 and the
 //     spec.wateringInterval floor as defense in depth -- both are already
 //     enforced by the CRD schema itself (Minimum=1; the CEL rule at
-//     30s/24h), so in the normal request path (mutating admission -> CRD
-//     defaulting -> CRD structural/CEL validation -> validating admission)
-//     the CRD rejects a bad value before this webhook ever sees it. See
-//     validate()'s own doc comment, and docs/adr/0009, for why duplicating
-//     that check here is deliberate rather than dead code.
+//     30s/24h), so in the normal request path described above the CRD
+//     rejects a bad value (at the validate(schema) step) before this webhook
+//     ever sees it. See validate()'s own doc comment, and docs/adr/0009, for
+//     why duplicating that check here is deliberate rather than dead code.
 import (
 	"context"
 	"fmt"
@@ -269,15 +286,19 @@ func (v *PlantCustomValidator) validate(plant *Plant) error {
 
 	// Defense in depth, not the primary enforcement path -- see this file's
 	// own header comment and docs/adr/0009. In the ordinary
-	// mutate-then-default-then-validate-schema-then-validate-webhook request
-	// flow, the CRD's own CEL rule (plant_types.go's
+	// default(decode)->mutate(webhook)->validate(schema)->validate(webhook)
+	// request flow, the CRD's own CEL rule (plant_types.go's
 	// XValidation:...duration(self) >= duration('30s')) rejects a sub-floor
-	// value before this webhook ever runs. This check exists for the case
-	// that CEL rule does not: an object that reaches this webhook without
-	// having passed CRD structural validation at all (a future schema change
-	// that loosens or drops the CEL rule without this webhook being updated
-	// in lockstep, or --validate=false against a raw PATCH), and for a
-	// friendlier message than CEL's own one-liner when it does fire.
+	// value before this webhook ever runs. This check exists for the one
+	// genuine way that CEL rule could stop being the thing that catches it:
+	// a future schema change on plant_types.go that loosens or drops the
+	// CEL rule without this webhook's own minWateringInterval being updated
+	// in lockstep -- and for a friendlier message than CEL's own one-liner
+	// on the rare chance it does still fire. (--validate=false is NOT such a
+	// path: it is a client-side kubectl flag that only skips CLIENT-side
+	// OpenAPI validation before the request is even sent -- the API
+	// server's own structural/CEL validation always runs server-side
+	// regardless of what any client requested.)
 	if d := plant.Spec.WateringInterval.Duration; d > 0 && d < minWateringInterval {
 		return fmt.Errorf(
 			"spec.wateringInterval %s is below the operator's %s floor: "+

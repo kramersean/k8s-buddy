@@ -49,6 +49,18 @@ type crdSchema struct {
 type crdProperty struct {
 	Default    any                    `json:"default"`
 	Properties map[string]crdProperty `json:"properties"`
+	// XKubernetesValidations is the field's own list of CEL rules (the
+	// generated form of one or more +kubebuilder:validation:XValidation
+	// markers), read by TestLeafMessageAgreesWithCRDSchema below.
+	XKubernetesValidations []crdValidationRule `json:"x-kubernetes-validations"`
+}
+
+// crdValidationRule is one entry of a field's `x-kubernetes-validations`
+// list: a CEL expression and the message the API server surfaces when it
+// evaluates false.
+type crdValidationRule struct {
+	Rule    string `json:"rule"`
+	Message string `json:"message"`
 }
 
 // loadPlantCRDSchema reads and parses the generated CRD, failing the test
@@ -156,6 +168,35 @@ func TestDefaultingAgreesWithCRDSchema(t *testing.T) {
 		require.Equal(t, want, plant.Spec.Chaos.EnableEndpoints)
 		require.Equal(t, DefaultChaosEnableEndpoints, plant.Spec.Chaos.EnableEndpoints)
 	})
+}
+
+// TestLeafMessageAgreesWithCRDSchema is TestDefaultingAgreesWithCRDSchema's
+// counterpart for the OTHER hardcoded string this package and plant_types.go
+// both carry: leafMessage (plant_webhook.go) and the additive CEL rule's own
+// `message:` (plant_types.go's `+kubebuilder:validation:XValidation:rule="self
+// >= 1",message="plants need at least one leaf"`) are two independent,
+// hand-typed copies of the exact same sentence. Nothing forces them to stay
+// identical except a human remembering to update both -- this test reads the
+// generated CRD's own x-kubernetes-validations off disk (never a second
+// hardcoded copy of the string in this test file) and fails the moment they
+// diverge, the same mechanical guarantee TestDefaultingAgreesWithCRDSchema
+// gives the six default values.
+func TestLeafMessageAgreesWithCRDSchema(t *testing.T) {
+	doc := loadPlantCRDSchema(t)
+	props := doc.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec.Properties
+
+	replicas, ok := props["replicas"]
+	require.True(t, ok, "generated CRD has no spec.replicas property at all")
+	require.NotEmpty(t, replicas.XKubernetesValidations,
+		"generated CRD's spec.replicas carries no CEL rules -- expected the additive rule "+
+			"backing the exact %q message (see plant_types.go's own comment on why it exists "+
+			"alongside Minimum=1)", leafMessage)
+
+	require.Equal(t, leafMessage, replicas.XKubernetesValidations[0].Message,
+		"the CRD's own CEL message for spec.replicas must equal PlantCustomValidator's leafMessage "+
+			"exactly -- these are two independently hardcoded copies of the same string "+
+			"(plant_types.go's XValidation marker and plant_webhook.go's leafMessage const) that must "+
+			"never diverge")
 }
 
 // TestDefault_LeavesExplicitValuesAlone proves the flip side of the
