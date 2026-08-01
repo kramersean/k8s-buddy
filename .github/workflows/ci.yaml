@@ -405,6 +405,17 @@ jobs:
           python3 -m pip install --quiet pyyaml
           make helm-rbac-drift-check
 
+      # config/webhook/manifests.yaml is generated (and drift-gated against
+      # its own +kubebuilder:webhook markers) by the `lint` job's own "make
+      # manifests generate" step; charts/k8s-buddy/templates/{mutating,
+      # validating}webhookconfiguration.yaml are hand-written Helm templates
+      # with no equivalent gate until this step -- see
+      # hack/check-helm-webhook-drift.py's own header comment.
+      - name: Assert the chart's webhook configurations have not drifted from config/webhook/manifests.yaml
+        run: |
+          python3 -m pip install --quiet pyyaml
+          make helm-webhook-drift-check
+
       # Renders the chart (with the optional sample Plant turned on, so
       # every template is exercised) and validates the output the same way
       # every kustomization above is validated. See the Makefile's

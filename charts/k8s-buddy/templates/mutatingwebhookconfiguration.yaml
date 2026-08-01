@@ -8,13 +8,15 @@
 # cluster-scoped, so two independent installs of this chart must never
 # collide on it.
 #
-# CI's `manifests` job diffs this file's RENDERED `webhooks[].failurePolicy`,
-# `.rules`, `.sideEffects`, and `.timeoutSeconds` against
-# config/webhook/manifests.yaml by hand (see hack/check-helm-rbac-drift.py's
-# own comment for why the analogous ClusterRole check normalizes away
-# resourceNames/name fields that are legitimately deployment-scoped) -- a
-# +kubebuilder:webhook marker change must be mirrored here the same way a
-# +kubebuilder:rbac marker change must be mirrored into clusterrole.yaml.
+# CI's `manifests` job runs `make helm-webhook-drift-check`
+# (hack/check-helm-webhook-drift.py), which renders this file's
+# `webhooks[].name/.rules/.failurePolicy/.sideEffects/.timeoutSeconds/
+# .admissionReviewVersions` and diffs them against config/webhook/
+# manifests.yaml (see that script's own comment for why metadata.name and
+# clientConfig are excused, mirroring hack/check-helm-rbac-drift.py's own
+# resourceNames exclusion) -- a +kubebuilder:webhook marker change must be
+# mirrored here the same way a +kubebuilder:rbac marker change must be
+# mirrored into clusterrole.yaml.
 #
 # caBundle is deliberately absent from clientConfig: cmd/plant-operator's own
 # certificate bootstrap (docs/adr/0009-webhook-certificate-strategy.md)

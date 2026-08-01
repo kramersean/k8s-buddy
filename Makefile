@@ -711,6 +711,20 @@ helm-rbac-drift-check: ## Assert charts/k8s-buddy's ClusterRole rules have not d
 	$(HELM) template k8s-buddy $(HELM_CHART_DIR) --show-only templates/clusterrole.yaml > $(BUILD_DIR)/chart-clusterrole.yaml
 	python3 hack/check-helm-rbac-drift.py $(BUILD_DIR)/chart-clusterrole.yaml
 
+.PHONY: helm-webhook-drift-check
+# Requires PyYAML, same as helm-rbac-drift-check above -- see
+# hack/check-helm-webhook-drift.py's own header comment: config/webhook/
+# manifests.yaml is generated and drift-gated against its +kubebuilder:webhook
+# markers by the `lint` CI job already; this is that same gate's counterpart
+# for the chart's hand-maintained mirror of those two webhook configurations.
+helm-webhook-drift-check: ## Assert charts/k8s-buddy's webhook configurations have not drifted from generated config/webhook/manifests.yaml
+	@mkdir -p $(BUILD_DIR)
+	$(HELM) template k8s-buddy $(HELM_CHART_DIR) \
+		--show-only templates/mutatingwebhookconfiguration.yaml \
+		--show-only templates/validatingwebhookconfiguration.yaml \
+		> $(BUILD_DIR)/chart-webhookconfigurations.yaml
+	python3 hack/check-helm-webhook-drift.py $(BUILD_DIR)/chart-webhookconfigurations.yaml
+
 .PHONY: kustomize-build-overlays
 kustomize-build-overlays: ## Build both Kustomize overlays (deploy/kustomize/overlays/{dev,prod}) and validate each with kubeconform -strict
 	@set -euo pipefail; \
