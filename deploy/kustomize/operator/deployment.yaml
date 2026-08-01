@@ -66,12 +66,38 @@ spec:
             - --metrics-bind-address=:8081
             - --health-probe-bind-address=:8082
             - --leader-elect=true
+            # --webhook-port, --webhook-cert-dir, --webhook-service-name, and
+            # the two --*-webhook-configuration-name flags are all left at
+            # their built-in defaults here on purpose: those defaults
+            # (cmd/plant-operator/main.go) already name exactly this
+            # manifest's own Service (webhook-service.yaml) and the two
+            # objects config/webhook/manifests.yaml creates (see
+            # api/v1alpha1/plant_webhook.go's own comment on that three-way
+            # agreement). charts/k8s-buddy overrides all five explicitly,
+            # since its objects are release-scoped rather than these fixed
+            # names.
+          env:
+            # Downward API, not a hardcoded value: lets
+            # cmd/plant-operator/main.go compute the correct DNS SANs for its
+            # self-signed webhook serving certificate (see
+            # docs/adr/0009-webhook-certificate-strategy.md) without this
+            # manifest and that Go code needing to agree on a namespace
+            # string independently. This is the SAME namespace
+            # metadata.namespace above already pins, just made visible to the
+            # container -- not a second source of truth for it.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: metrics
               containerPort: 8081
               protocol: TCP
             - name: probes
               containerPort: 8082
+              protocol: TCP
+            - name: webhook
+              containerPort: 9443
               protocol: TCP
           securityContext:
             runAsNonRoot: true
@@ -101,3 +127,18 @@ spec:
               port: probes
             periodSeconds: 5
             failureThreshold: 3
+          volumeMounts:
+            # Where cmd/plant-operator/main.go's certificate bootstrap
+            # (webhookcerts.go) writes tls.crt/tls.key at every process
+            # startup, and where controller-runtime's webhook.Server reads
+            # them back from. emptyDir, not a Secret or PVC: see
+            # docs/adr/0009 for why nothing here needs to survive a restart
+            # -- the certificate (and the caBundle patched onto both webhook
+            # configurations) is regenerated fresh every time this container
+            # starts, so there is nothing to persist.
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: false
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}

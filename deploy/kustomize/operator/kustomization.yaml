@@ -12,8 +12,10 @@ namespace: k8s-buddy-system
 resources:
   - namespace.yaml
   - ../../../config/rbac
+  - ../../../config/webhook
   - deployment.yaml
   - service.yaml
+  - webhook-service.yaml
 
 # See deploy/kustomize/base/kustomization.yaml's own comment for why this
 # exists at all: `make deploy-operator` overrides newTag with the immutable
