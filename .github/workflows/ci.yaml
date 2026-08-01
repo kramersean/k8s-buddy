@@ -23,6 +23,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/sean-kramer/k8s-buddy/buddy-api
+  OPERATOR_IMAGE: ghcr.io/sean-kramer/k8s-buddy/plant-operator
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -58,6 +59,22 @@ jobs:
           fi
           echo "All Go files are gofmt-formatted."
 
+      # Regenerates the CRD (config/crd/bases), RBAC (config/rbac/role.yaml),
+      # and deepcopy (api/v1alpha1/zz_generated.deepcopy.go) from the
+      # +kubebuilder markers and diffs the result against what's committed.
+      # Without this, a marker edit that never got followed by `make
+      # generate manifests` -- or a hand-edit to role.yaml or the CRD, both
+      # of which are supposed to be generated-only -- would pass CI
+      # unnoticed: install-crd in the e2e job below regenerates before
+      # applying, so a stale committed manifest is invisible to every other
+      # job. `git diff --exit-code` is what actually fails the build on
+      # drift, not just recomputing it.
+      - name: make manifests generate (assert no drift against committed output)
+        run: |
+          set -euo pipefail
+          make manifests generate
+          git diff --exit-code config/ api/
+
   # ---------------------------------------------------------------------------
   # test -- ubuntu-latest has a C toolchain, so this is where the race
   # detector actually runs (the Windows dev box cannot run it). Both the
@@ -67,7 +84,11 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20, not 10: this job also runs make test-envtest, which downloads the
+    # envtest control-plane binaries (etcd, kube-apiserver, kubectl) on
+    # first run and boots a real control plane -- both real wall-clock costs
+    # test-race/test-cover above never had to pay.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -149,7 +170,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build (push only on a push to main)
+      - name: Build buddy-api (push only on a push to main)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -161,19 +182,40 @@ jobs:
             VERSION=${{ steps.vars.outputs.version }}
             COMMIT=${{ steps.vars.outputs.commit }}
 
-      # SBOM is generated from source (go.sum et al.), not from the built
+      # Same treatment, same gating, as buddy-api above: a portfolio repo
+      # that multi-arch-builds and pushes one of its two images but not the
+      # other invites the question of why. build/Dockerfile.plant-operator
+      # is cross-compiled the same way (--platform=$BUILDPLATFORM,
+      # GOOS/GOARCH=$TARGETOS/$TARGETARCH, COPY-only final stage), so this
+      # needs no QEMU either.
+      - name: Build plant-operator (push only on a push to main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.plant-operator
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ env.OPERATOR_IMAGE }}:${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
+      # SBOM is generated from source (go.sum et al.), not from a built
       # image: a PR build above is intentionally push:false/load:false (a
       # multi-platform buildx build cannot be --load'ed into the local
       # daemon), so on a PR there is no local image to point sbom-action at.
-      # A path-based SBOM works identically for both push and PR events.
+      # A path-based SBOM works identically for both push and PR events, and
+      # covers both binaries' dependencies in one pass since they share a
+      # single go.mod -- a second, per-binary SBOM would be a duplicate of
+      # the same source tree, not additional coverage.
       - name: Generate SBOM
         uses: anchore/sbom-action@v0.24.0
         with:
           path: .
           format: spdx-json
-          output-file: buddy-api-sbom.spdx.json
+          output-file: k8s-buddy-sbom.spdx.json
           upload-artifact: true
-          artifact-name: buddy-api-sbom.spdx.json
+          artifact-name: k8s-buddy-sbom.spdx.json
 
   # ---------------------------------------------------------------------------
   # scan -- trivy over the filesystem (deps/config, always available) and
@@ -203,7 +245,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build image locally for scanning
+      - name: Build buddy-api image locally for scanning
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -216,6 +258,25 @@ jobs:
             VERSION=${{ steps.vars.outputs.version }}
             COMMIT=${{ steps.vars.outputs.commit }}
 
+      # Same treatment as buddy-api: built locally (load: true) rather than
+      # pulled, for the same fork-PR reason described in this job's own
+      # header comment.
+      - name: Build plant-operator image locally for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.plant-operator
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.OPERATOR_IMAGE }}:scan
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
+      # Filesystem scan covers the whole repository (scan-ref: .) in one
+      # pass -- both cmd/buddy-api and cmd/plant-operator source and their
+      # shared go.sum -- so there is only one of these, not one per binary.
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -224,11 +285,19 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
 
-      - name: Trivy image scan
+      - name: Trivy image scan (buddy-api)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ env.IMAGE }}:scan
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy image scan (plant-operator)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.OPERATOR_IMAGE }}:scan
           severity: HIGH,CRITICAL
           exit-code: "1"
 
@@ -291,6 +360,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # `make install-crd` -> `manifests` -> `go install
+      # sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0` (the
+      # Makefile's pinned-tool pattern). Without this step, that `go
+      # install` would silently run against whatever Go the runner image
+      # happens to preinstall -- unpinned, unlike every other job here,
+      # which all pin go-version-file: go.mod.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
 
       # Same node topology, same node image, as local dev
       # (deploy/kind/kind-config.yaml pins kindest/node:v1.36.1, 3 nodes).
@@ -387,8 +468,24 @@ jobs:
           kubectl run curl-fernie --image=curlimages/curl:8.11.1 --restart=Never --rm -i \
             --command -- curl -sf --max-time 5 http://fernie.default.svc.cluster.local/status
 
+      # Asserts the count, not just that the command exits 0: `kubectl get`
+      # against a selector that matches nothing still exits 0 and merely
+      # prints "No resources found" -- a step that only ran the command
+      # would pass vacuously if the label selector ever stopped matching,
+      # which would make the "after" wait loop below see remaining=0 on its
+      # very first iteration and report a false GC pass having proven
+      # nothing at all. Failing loudly here if the count isn't exactly 5 is
+      # what keeps the flagship assertion below honest.
       - name: Children exist before deletion (the "before" half of the GC proof)
-        run: kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie
+        run: |
+          set -euo pipefail
+          kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie
+          before="$(kubectl get deploy,svc,cm,pdb,sa -l buddy.k8s-buddy.io/plant=fernie --no-headers | wc -l)"
+          if [ "$before" -ne 5 ]; then
+            echo "expected exactly 5 children before delete, saw $before -- the GC proof below would be meaningless" >&2
+            exit 1
+          fi
+          echo "confirmed: 5 children present before delete"
 
       # THE GARBAGE COLLECTION PROOF. This is what envtest structurally
       # cannot show (no garbage-collector controller runs there) and the

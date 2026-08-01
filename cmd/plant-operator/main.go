@@ -63,7 +63,15 @@ func main() {
 	// health/readiness 8082 -- per the operator plan's Global Constraints.
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8082", "The address the health/readiness probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
+	// Defaults to false, matching kubebuilder's own scaffold: leader
+	// election needs a Lease in a real namespace to contend over, which an
+	// out-of-cluster `go run ./cmd/plant-operator` has no way to resolve
+	// (it fails outright with "unable to find leader election namespace").
+	// The deployed manifest (deploy/kustomize/operator/deployment.yaml)
+	// passes --leader-elect=true explicitly, so leader election is still
+	// genuinely enabled in-cluster -- this default only affects a bare
+	// local run.
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for the operator manager. Enabling this ensures there is only one active "+
 			"plant-operator at a time when running more than one replica.")
 

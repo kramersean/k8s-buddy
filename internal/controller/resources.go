@@ -348,8 +348,9 @@ func DeploymentFor(p *buddyv1alpha1.Plant) *appsv1.Deployment {
 // silently inherit the namespace's "default" ServiceAccount, is the point:
 // this manifest states its posture ("this workload has been given its own
 // identity, and that identity carries no token") instead of leaving a reader
-// to infer it from an absence. See config/rbac/role.yaml's own comment for
-// the contrasting operator-pod posture, which does need its token mounted.
+// to infer it from an absence. See config/rbac/service_account.yaml's own
+// comment for the contrasting operator-pod posture, which does need its
+// token mounted.
 func ServiceAccountFor(p *buddyv1alpha1.Plant) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
