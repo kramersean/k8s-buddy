@@ -1,0 +1,12 @@
+# fernie: the everyday-defaults plant. Only species and replicas are set
+# explicitly (both happen to match the CRD's own defaults); image,
+# resourceProfile, wateringInterval, and latencyBudget are left unset so the
+# apiserver's defaulting fills them in, demonstrating that `spec: {}` --
+# effectively what's left here -- is already a fully valid, runnable Plant.
+apiVersion: buddy.k8s-buddy.io/v1alpha1
+kind: Plant
+metadata:
+  name: fernie
+spec:
+  species: fern
+  replicas: 3

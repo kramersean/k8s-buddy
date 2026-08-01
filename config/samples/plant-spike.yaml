@@ -1,0 +1,11 @@
+# spike: a smaller, beefier plant. Fewer replicas than fernie but a larger
+# per-pod resource envelope, to show the same CRD covering a different shape
+# of workload rather than every Plant looking identical.
+apiVersion: buddy.k8s-buddy.io/v1alpha1
+kind: Plant
+metadata:
+  name: spike
+spec:
+  species: cactus
+  replicas: 2
+  resourceProfile: medium

@@ -20,6 +20,18 @@ COVER_FILE   := coverage.out
 GOEXE                  := $(shell go env GOEXE)
 GOLANGCI_LINT_VERSION   := v2.12.2
 GOLANGCI_LINT           := $(TOOLS_DIR)/golangci-lint$(GOEXE)
+CONTROLLER_GEN_VERSION  := v0.21.0
+CONTROLLER_GEN          := $(TOOLS_DIR)/controller-gen$(GOEXE)
+
+# Where controller-gen's `object` (deepcopy) and `crd`/`rbac` generators look
+# for +kubebuilder markers, and where the CRD generator writes its output.
+# ./api/... itself has no .go files directly (only its v1alpha1 subpackage
+# does), and controller-gen v0.21's loader errors on an empty root rather
+# than skipping it, so this points at the package directly. It gains a
+# second, space-separated path in Task 5 once +kubebuilder:rbac markers
+# exist on internal/controller's reconciler.
+API_DIRS := ./api/v1alpha1/...
+CRD_DIR  := config/crd/bases
 
 GIT_SHA  := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 COMMIT   := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -71,6 +83,23 @@ $(GOLANGCI_LINT):
 	@mkdir -p $(TOOLS_DIR)
 	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION) into $(TOOLS_DIR)..."
 	@GOBIN="$$(pwd)/$(TOOLS_DIR)" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+.PHONY: controller-gen
+controller-gen: $(CONTROLLER_GEN) ## Install the pinned controller-gen version into .tools/
+
+$(CONTROLLER_GEN):
+	@mkdir -p $(TOOLS_DIR)
+	@echo "Installing controller-gen $(CONTROLLER_GEN_VERSION) into $(TOOLS_DIR)..."
+	@GOBIN="$$(pwd)/$(TOOLS_DIR)" go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
+.PHONY: generate
+generate: $(CONTROLLER_GEN) ## Regenerate zz_generated.deepcopy.go for every +kubebuilder:object:generate type
+	$(CONTROLLER_GEN) object paths="$(API_DIRS)"
+
+.PHONY: manifests
+manifests: $(CONTROLLER_GEN) ## Regenerate the CRD manifests under config/crd/bases (and, later, RBAC) from +kubebuilder markers
+	@mkdir -p $(CRD_DIR)
+	$(CONTROLLER_GEN) crd paths="$(API_DIRS)" output:crd:artifacts:config=$(CRD_DIR)
 
 .PHONY: test
 test: ## Run unit tests (no-op on an empty module)
@@ -205,7 +234,7 @@ clean: ## Remove build artifacts and coverage output (leaves .tools/ intact; see
 	@rm -rf $(BIN_DIR) $(BUILD_DIR) $(COVER_FILE)
 
 .PHONY: tools
-tools: $(GOLANGCI_LINT) ## Install/update pinned local developer tooling into .tools/
+tools: $(GOLANGCI_LINT) $(CONTROLLER_GEN) ## Install/update pinned local developer tooling into .tools/
 
 .PHONY: tools-clean
 tools-clean: ## Remove downloaded local tooling
