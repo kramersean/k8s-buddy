@@ -42,8 +42,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -280,18 +280,6 @@ func locateSetupEnvtest() (string, error) {
 
 // --- shared test helpers -----------------------------------------------
 
-// childGVKs lists the four child kinds every Plant owns as of this task.
-// (Task 5 adds a fifth, ServiceAccount, once resources.go grows
-// ServiceAccountFor -- out of scope here.)
-func childGVKs() []schema.GroupVersionKind {
-	return []schema.GroupVersionKind{
-		appsv1.SchemeGroupVersion.WithKind("Deployment"),
-		corev1.SchemeGroupVersion.WithKind("Service"),
-		corev1.SchemeGroupVersion.WithKind("ConfigMap"),
-		policyv1.SchemeGroupVersion.WithKind("PodDisruptionBudget"),
-	}
-}
-
 // newTestNamespace creates a uniquely-named namespace (via GenerateName) and
 // returns its name. Every test creates its Plant(s) in a namespace of their
 // own so that no two tests' objects can ever collide or be mistaken for one
@@ -362,6 +350,31 @@ func deletePlantAndWait(t *testing.T, plant *buddyv1alpha1.Plant) {
 	}, 10*time.Second, 100*time.Millisecond, "cleanup: plant %s was never actually deleted", key)
 }
 
+// updatePlant fetches the Plant at key, applies mutate to it, and Updates
+// it, retrying the whole fetch-mutate-update cycle on a Conflict via
+// retry.RetryOnConflict. Every test that reads a Plant and writes it back
+// needs this rather than a plain Get-then-Update: the reconciler's OWN
+// status-subresource write can land in the exact window between this
+// helper's Get and Update (most commonly right after waitForChildrenExist,
+// while the creation reconcile's status write is still in flight), bumping
+// resourceVersion and turning what looks like an unconditional Update into
+// an intermittent 409 the moment the reconciler is even mildly busy. A
+// bare require.NoError(t, testClient.Update(...)) has no way to recover
+// from that; retrying with a fresh Get does.
+func updatePlant(t *testing.T, key client.ObjectKey, mutate func(*buddyv1alpha1.Plant)) *buddyv1alpha1.Plant {
+	t.Helper()
+	fresh := &buddyv1alpha1.Plant{}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := testClient.Get(testCtx, key, fresh); err != nil {
+			return err
+		}
+		mutate(fresh)
+		return testClient.Update(testCtx, fresh)
+	})
+	require.NoError(t, err, "updating plant %s", key)
+	return fresh
+}
+
 // waitForFinalizer polls until plant carries plantFinalizer.
 func waitForFinalizer(t *testing.T, plant *buddyv1alpha1.Plant) {
 	t.Helper()
@@ -417,17 +430,24 @@ func waitForStatusPopulated(t *testing.T, plant *buddyv1alpha1.Plant) *buddyv1al
 // assertControllerOwnerRef asserts obj carries exactly one Controller:true
 // owner reference, pointing at owner with the correct Kind, APIVersion,
 // Name, and UID -- what Kubernetes garbage collection itself reads to
-// decide whether to remove obj when owner is deleted.
+// decide whether to remove obj when owner is deleted. "Exactly one" is
+// actually checked (not just found-at-least-one): the API server itself
+// rejects a second Controller:true owner reference on the same object, so
+// more than one here would mean this suite's own scheme/client is doing
+// something it shouldn't, not a real possible cluster state -- but the
+// assertion is cheap and keeps the comment honest either way.
 func assertControllerOwnerRef(t *testing.T, obj metav1.Object, owner *buddyv1alpha1.Plant) {
 	t.Helper()
-	var found *metav1.OwnerReference
-	for i, ref := range obj.GetOwnerReferences() {
+	var controllerRefs []metav1.OwnerReference
+	for _, ref := range obj.GetOwnerReferences() {
 		if ref.Controller != nil && *ref.Controller {
-			found = &obj.GetOwnerReferences()[i]
-			break
+			controllerRefs = append(controllerRefs, ref)
 		}
 	}
-	require.NotNil(t, found, "no controller owner reference on %s/%s", obj.GetNamespace(), obj.GetName())
+	require.Len(t, controllerRefs, 1, "expected exactly one controller owner reference on %s/%s, got %+v",
+		obj.GetNamespace(), obj.GetName(), controllerRefs)
+
+	found := controllerRefs[0]
 	require.Equal(t, "Plant", found.Kind)
 	require.Equal(t, buddyv1alpha1.GroupVersion.String(), found.APIVersion)
 	require.Equal(t, owner.Name, found.Name)
@@ -445,10 +465,20 @@ func assertControllerOwnerRef(t *testing.T, obj metav1.Object, owner *buddyv1alp
 // possibly have made has already happened, which is what makes it safe to
 // use as a "that reconcile is now fully finished" signal in
 // waitForReconcileQuiescence and triggerReconcile below.
-func reconcileTotal(t *testing.T) float64 {
-	t.Helper()
+//
+// It deliberately takes no *testing.T and returns an error instead of
+// calling require.NoError itself: both call sites below invoke it from
+// inside a require.Eventually condition function, which testify runs on a
+// goroutine of its own -- calling a require.* (FailNow-family) method from
+// that goroutine, rather than the test's own, is undefined behavior per the
+// testing package's own rules. Returning the error and letting the caller
+// decide (log-and-retry inside Eventually, require.NoError only on the
+// test's own goroutine) avoids that entirely.
+func reconcileTotal() (float64, error) {
 	families, err := metrics.Registry.Gather()
-	require.NoError(t, err)
+	if err != nil {
+		return 0, fmt.Errorf("gathering metrics: %w", err)
+	}
 
 	var total float64
 	for _, fam := range families {
@@ -463,7 +493,7 @@ func reconcileTotal(t *testing.T) float64 {
 			}
 		}
 	}
-	return total
+	return total, nil
 }
 
 // waitForReconcileQuiescence polls reconcileTotal until it has reported the
@@ -477,7 +507,16 @@ func waitForReconcileQuiescence(t *testing.T) {
 	last := -1.0
 	stable := 0
 	require.Eventually(t, func() bool {
-		cur := reconcileTotal(t)
+		cur, err := reconcileTotal()
+		if err != nil {
+			// t.Logf, unlike require.NoError, is safe to call from this
+			// polling goroutine -- see reconcileTotal's own comment.
+			// Gather() against an in-process registry essentially never
+			// fails; if it somehow does, this makes the eventual timeout
+			// message diagnosable instead of silently looping forever.
+			t.Logf("reconcileTotal: %v", err)
+			return false
+		}
 		if cur == last {
 			stable++
 		} else {
@@ -496,7 +535,8 @@ func waitForReconcileQuiescence(t *testing.T) {
 func triggerReconcile(t *testing.T, plant *buddyv1alpha1.Plant) {
 	t.Helper()
 	waitForReconcileQuiescence(t)
-	before := reconcileTotal(t)
+	before, err := reconcileTotal()
+	require.NoError(t, err) // safe here: runs on the test's own goroutine, not inside Eventually.
 
 	key := client.ObjectKeyFromObject(plant)
 	fresh := &buddyv1alpha1.Plant{}
@@ -508,7 +548,12 @@ func triggerReconcile(t *testing.T, plant *buddyv1alpha1.Plant) {
 	require.NoError(t, testClient.Update(testCtx, fresh))
 
 	require.Eventually(t, func() bool {
-		return reconcileTotal(t) > before
+		cur, err := reconcileTotal()
+		if err != nil {
+			t.Logf("reconcileTotal: %v", err)
+			return false
+		}
+		return cur > before
 	}, 10*time.Second, 100*time.Millisecond, "annotation touch never triggered a reconcile")
 
 	waitForReconcileQuiescence(t)

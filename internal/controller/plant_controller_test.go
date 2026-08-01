@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -52,12 +53,22 @@ func TestReconcile_CreatesAllFourChildrenWithOwnerReferences(t *testing.T) {
 
 // --- case 2: finalizer added on creation ---------------------------------
 
+// TestReconcile_AddsFinalizerOnCreate checks against the literal finalizer
+// string, not the plantFinalizer constant waitForFinalizer (and every other
+// test) uses: the finalizer is user-visible API surface the operator plan
+// specifies verbatim, so a test that only ever compares against the source
+// constant would keep passing even if that constant's VALUE silently
+// drifted away from "buddy.k8s-buddy.io/finalizer".
 func TestReconcile_AddsFinalizerOnCreate(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 3)
 	createPlant(t, plant)
 
 	waitForFinalizer(t, plant)
+
+	got := &buddyv1alpha1.Plant{}
+	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), got))
+	require.Contains(t, got.Finalizers, "buddy.k8s-buddy.io/finalizer")
 }
 
 // --- case 3: honest not-ready status, plus a clearly-separate ready path ---
@@ -70,6 +81,13 @@ func TestReconcile_AddsFinalizerOnCreate(t *testing.T) {
 // before anything has started serving traffic, and asserting it here proves
 // the not-ready path (Ready=False/ReplicasNotReady) actually works, rather
 // than assuming it does because the ready path (below) was never exercised.
+//
+// The condition Type and Reason are checked against the literal strings
+// "Ready" and "ReplicasNotReady", not the ConditionReady/ReasonReplicasNotReady
+// source constants every other test uses: both are user-visible API surface
+// the operator plan specifies verbatim, so a test that only ever compares
+// against the source constants would keep passing even if those constants'
+// VALUES silently drifted.
 func TestReconcile_StatusReflectsNotReadyWithNoKubelet(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "fernie", 4)
@@ -81,10 +99,10 @@ func TestReconcile_StatusReflectsNotReadyWithNoKubelet(t *testing.T) {
 	require.EqualValues(t, 0, got.Status.ReadyReplicas)
 
 	conditions := conditionsByType(got.Status.Conditions)
-	ready, ok := conditions[ConditionReady]
+	ready, ok := conditions["Ready"]
 	require.True(t, ok, "no Ready condition present")
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
-	require.Equal(t, ReasonReplicasNotReady, ready.Reason)
+	require.Equal(t, "ReplicasNotReady", ready.Reason)
 }
 
 // TestReconcile_StatusReflectsReadyWhenKubeletSimulated is the separate,
@@ -170,16 +188,31 @@ func TestReconcile_Idempotence_SteadyStateReconcileWritesNothing(t *testing.T) {
 	waitForChildrenExist(t, plant)
 	waitForStatusPopulated(t, plant)
 
+	// Quiesce BEFORE resetting the counters, not after: triggerReconcile
+	// itself also quiesces first, but a still-settling creation reconcile
+	// (finalizer-add, children-create, status-write are three separate
+	// Reconcile passes) can still be in flight right up until this point.
+	// Resetting first and quiescing second would let that trailing
+	// reconcile's writes land AFTER the reset and go uncounted -- exactly
+	// the hole this suite exists to close.
+	waitForReconcileQuiescence(t)
 	testCounting.reset()
 
 	triggerReconcile(t, plant)
 
+	// Sum every GVK the counting client has EVER seen a write against, not
+	// just the four expected children: a write storm on the Plant object
+	// itself (e.g. a finalizer re-add loop) or a write bucketed under some
+	// unexpected GVK would be invisible to a loop that only inspects
+	// childGVKs(). The full map is still printed on failure so a non-zero
+	// total remains diagnosable.
 	writes := testCounting.snapshot()
-	for _, gvk := range childGVKs() {
-		wc := writes[gvk]
-		require.Zero(t, wc.total(),
-			"expected zero Create/Update/Patch against %s on a steady-state reconcile, got %+v", gvk, wc)
+	var writeTotal int
+	for _, wc := range writes {
+		writeTotal += wc.total()
 	}
+	require.Zero(t, writeTotal,
+		"expected zero Create/Update/Patch writes anywhere on a steady-state reconcile, got %+v", writes)
 
 	statusWrites := testCounting.statusSnapshot()
 	var statusTotal int
@@ -297,10 +330,9 @@ func TestReconcile_ReplicasUpdatePropagates(t *testing.T) {
 	waitForChildrenExist(t, plant)
 	waitForStatusPopulated(t, plant)
 
-	fresh := &buddyv1alpha1.Plant{}
-	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), fresh))
-	fresh.Spec.Replicas = int32Ptr(6)
-	require.NoError(t, testClient.Update(testCtx, fresh))
+	updatePlant(t, client.ObjectKeyFromObject(plant), func(p *buddyv1alpha1.Plant) {
+		p.Spec.Replicas = int32Ptr(6)
+	})
 
 	deploymentKey := client.ObjectKey{Namespace: ns, Name: "fernie"}
 	require.Eventually(t, func() bool {
@@ -339,10 +371,9 @@ func TestReconcile_ResourceProfileUpdatePropagates(t *testing.T) {
 
 			waitForChildrenExist(t, plant)
 
-			fresh := &buddyv1alpha1.Plant{}
-			require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), fresh))
-			fresh.Spec.ResourceProfile = tc.profile
-			require.NoError(t, testClient.Update(testCtx, fresh))
+			updatePlant(t, client.ObjectKeyFromObject(plant), func(p *buddyv1alpha1.Plant) {
+				p.Spec.ResourceProfile = tc.profile
+			})
 
 			want := ResourcesFor(tc.profile)
 			key := client.ObjectKey{Namespace: ns, Name: "fernie"}
@@ -371,10 +402,9 @@ func TestReconcile_ObservedGenerationTracksMetadataGeneration(t *testing.T) {
 	first := waitForStatusPopulated(t, plant)
 	require.Equal(t, first.Generation, first.Status.ObservedGeneration)
 
-	fresh := &buddyv1alpha1.Plant{}
-	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), fresh))
-	fresh.Spec.Replicas = int32Ptr(5)
-	require.NoError(t, testClient.Update(testCtx, fresh))
+	fresh := updatePlant(t, client.ObjectKeyFromObject(plant), func(p *buddyv1alpha1.Plant) {
+		p.Spec.Replicas = int32Ptr(5)
+	})
 	require.Greater(t, fresh.Generation, first.Generation, "a spec change must bump metadata.generation")
 
 	require.Eventually(t, func() bool {
@@ -429,8 +459,7 @@ func TestReconcile_DeleteRemovesFinalizerAndOwnerReferencesAreCorrect(t *testing
 	key := client.ObjectKeyFromObject(plant)
 	require.Eventually(t, func() bool {
 		got := &buddyv1alpha1.Plant{}
-		err := testClient.Get(testCtx, key, got)
-		return client.IgnoreNotFound(err) == nil && err != nil
+		return apierrors.IsNotFound(testClient.Get(testCtx, key, got))
 	}, 10*time.Second, 100*time.Millisecond, "plant %s was never actually deleted", key)
 }
 
@@ -459,10 +488,20 @@ func TestReconcile_TwoPlantsSameNamespaceDoNotInterfere(t *testing.T) {
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "spike"}, deploymentB))
 	assertControllerOwnerRef(t, deploymentB, ownerB)
 
-	beforeB := deploymentB.ResourceVersion
+	// Non-interference is proven with the counting client, not a
+	// resourceVersion comparison -- counting_client_test.go's own doc
+	// comment is why resourceVersion is the wrong tool: a byte-identical
+	// write would leave it unchanged even though a write happened. Both
+	// Plants are quiesced first, then only fernie's spec is changed, so
+	// exactly ONE write to the Deployment GVK (fernie's own) is expected;
+	// two or more would mean spike's Deployment was touched too, which is
+	// exactly the leak this test exists to catch.
+	waitForReconcileQuiescence(t)
+	testCounting.reset()
 
-	ownerA.Spec.Replicas = int32Ptr(7)
-	require.NoError(t, testClient.Update(testCtx, ownerA))
+	updatePlant(t, client.ObjectKeyFromObject(plantA), func(p *buddyv1alpha1.Plant) {
+		p.Spec.Replicas = int32Ptr(7)
+	})
 
 	require.Eventually(t, func() bool {
 		d := &appsv1.Deployment{}
@@ -471,12 +510,17 @@ func TestReconcile_TwoPlantsSameNamespaceDoNotInterfere(t *testing.T) {
 		}
 		return d.Spec.Replicas != nil && *d.Spec.Replicas == 7
 	}, 10*time.Second, 100*time.Millisecond, "fernie's Deployment never scaled to 7")
+	waitForReconcileQuiescence(t)
+
+	deploymentGVK := appsv1.SchemeGroupVersion.WithKind("Deployment")
+	writes := testCounting.snapshot()
+	require.Equal(t, 1, writes[deploymentGVK].total(),
+		"expected exactly one Deployment write (fernie's own) while only fernie's spec changed, got %+v -- "+
+			"more than one would mean spike's Deployment was written too", writes[deploymentGVK])
 
 	afterB := &appsv1.Deployment{}
 	require.NoError(t, testClient.Get(testCtx, client.ObjectKey{Namespace: ns, Name: "spike"}, afterB))
-	require.Equal(t, beforeB, afterB.ResourceVersion,
-		"spike's Deployment was modified by a reconcile that should only ever have touched fernie's children")
-	require.EqualValues(t, 2, *afterB.Spec.Replicas)
+	require.EqualValues(t, 2, *afterB.Spec.Replicas, "spike's Deployment replicas must be untouched by fernie's reconcile")
 }
 
 // --- case 11: condition stability across a real (non-skipped) status write -
@@ -501,10 +545,9 @@ func TestReconcile_ConditionLastTransitionTimeStableAcrossRealStatusWrite(t *tes
 	require.NotEmpty(t, before.Status.Conditions)
 	beforeByType := conditionsByType(before.Status.Conditions)
 
-	fresh := &buddyv1alpha1.Plant{}
-	require.NoError(t, testClient.Get(testCtx, client.ObjectKeyFromObject(plant), fresh))
-	fresh.Spec.Replicas = int32Ptr(5)
-	require.NoError(t, testClient.Update(testCtx, fresh))
+	updatePlant(t, client.ObjectKeyFromObject(plant), func(p *buddyv1alpha1.Plant) {
+		p.Spec.Replicas = int32Ptr(5)
+	})
 
 	require.Eventually(t, func() bool {
 		p := &buddyv1alpha1.Plant{}

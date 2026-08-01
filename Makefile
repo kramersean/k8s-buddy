@@ -71,12 +71,18 @@ fmt: ## Format all Go source in place with gofmt
 	@gofmt -l -w .
 
 .PHONY: vet
-vet: ## Run go vet across the module (no-op on an empty module)
+# The second invocation, with -tags envtest, is compile-only -- it needs no
+# control plane -- and exists so the envtest-gated suite in
+# internal/controller (see suite_test.go) can't accumulate a compile error
+# invisibly between `make test-envtest` runs: a plain `go vet ./...` never
+# even looks at build-tag-gated files.
+vet: ## Run go vet across the module, including the envtest-tagged suite (no-op on an empty module)
 	@pkgs="$$(go list ./... 2>/dev/null)"; \
 	if [ -z "$$pkgs" ]; then \
 		echo "vet: no Go packages yet, skipping"; \
 	else \
 		go vet ./...; \
+		go vet -tags envtest ./internal/controller/...; \
 	fi
 
 .PHONY: lint
@@ -151,7 +157,12 @@ $(SETUP_ENVTEST):
 	@GOBIN="$$(pwd)/$(TOOLS_DIR)" go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
 .PHONY: envtest
-envtest: $(SETUP_ENVTEST) ## Download/locate the envtest control-plane binaries (Kubernetes $(ENVTEST_K8S_VERSION)) via the pinned setup-envtest, and print KUBEBUILDER_ASSETS
+# The help text below deliberately doesn't interpolate $(ENVTEST_K8S_VERSION):
+# `make help` extracts ## comments with awk over the raw Makefile text, not
+# make-expanded text, so a $(...) reference here would print literally
+# instead of as a version number. See ENVTEST_K8S_VERSION's own definition
+# above for the pinned value.
+envtest: $(SETUP_ENVTEST) ## Download/locate the envtest control-plane binaries via the pinned setup-envtest, and print KUBEBUILDER_ASSETS
 	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path
 
 .PHONY: test-envtest
@@ -162,10 +173,14 @@ envtest: $(SETUP_ENVTEST) ## Download/locate the envtest control-plane binaries 
 # resolves KUBEBUILDER_ASSETS on its own if it isn't already set when
 # invoked some other way (e.g. `go test -tags envtest ./internal/controller/...`
 # directly), and fails loudly rather than skipping if that resolution fails.
+#
+# -count=1 disables go test's result cache: a suite that boots a real
+# control plane must never report a stale, cached PASS from a previous run.
 test-envtest: $(SETUP_ENVTEST) ## Run the envtest controller suite (boots a real kube-apiserver + etcd; internal/controller only)
 	@assets="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)"; \
+	[ -n "$$assets" ] || { echo "test-envtest: setup-envtest returned no path; aborting" >&2; exit 1; }; \
 	echo "test-envtest: KUBEBUILDER_ASSETS=$$assets"; \
-	KUBEBUILDER_ASSETS="$$assets" go test -tags envtest ./internal/controller/... -v
+	KUBEBUILDER_ASSETS="$$assets" go test -tags envtest -count=1 ./internal/controller/... -v
 
 .PHONY: build
 build: ## Build every ./cmd/* binary into bin/ (no-op until cmd/ exists)
