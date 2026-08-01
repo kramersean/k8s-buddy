@@ -69,6 +69,15 @@ test: ## Run unit tests (no-op on an empty module)
 		go test ./...; \
 	fi
 
+.PHONY: test-race
+test-race: ## Run unit tests with the race detector (needs cgo; not run on this Windows dev box -- CI runs it on ubuntu-latest)
+	@pkgs="$$(go list ./... 2>/dev/null)"; \
+	if [ -z "$$pkgs" ]; then \
+		echo "test-race: no Go packages yet, skipping"; \
+	else \
+		go test -race ./...; \
+	fi
+
 .PHONY: test-cover
 test-cover: ## Run unit tests with a coverage profile (no-op on an empty module)
 	@pkgs="$$(go list ./... 2>/dev/null)"; \
