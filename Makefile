@@ -27,6 +27,11 @@ VERSION  ?= $(GIT_SHA)
 IMAGE_PREFIX := ghcr.io/sean-kramer/k8s-buddy
 IMAGE_NAME   := buddy-api
 IMAGE        := $(IMAGE_PREFIX)/$(IMAGE_NAME):$(GIT_SHA)
+IMAGE_DEV    := $(IMAGE_PREFIX)/$(IMAGE_NAME):dev
+
+KIND         := kind
+KIND_CLUSTER := k8s-buddy
+KIND_CONFIG  := deploy/kind/kind-config.yaml
 
 .PHONY: help
 help: ## Show this help
@@ -100,17 +105,30 @@ build: ## Build every ./cmd/* binary into bin/ (no-op until cmd/ exists)
 	fi
 
 .PHONY: docker-build
-docker-build: ## Build the buddy-api container image, tagged with the short git SHA
-	@if [ ! -f build/Dockerfile.buddy-api ]; then \
-		echo "docker-build: build/Dockerfile.buddy-api does not exist yet (added in Task 5); nothing to build" >&2; \
-		exit 1; \
-	fi
+docker-build: ## Build the buddy-api container image, tagged with the short git SHA and :dev
 	docker build \
 		-f build/Dockerfile.buddy-api \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		-t $(IMAGE) \
+		-t $(IMAGE_DEV) \
 		.
+
+.PHONY: kind-up
+kind-up: ## Create the kind cluster (k8s-buddy) if it does not already exist
+	@if $(KIND) get clusters 2>/dev/null | grep -qx '$(KIND_CLUSTER)'; then \
+		echo "kind-up: cluster '$(KIND_CLUSTER)' already exists, skipping"; \
+	else \
+		$(KIND) create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG); \
+	fi
+
+.PHONY: kind-down
+kind-down: ## Delete the kind cluster (k8s-buddy), succeeding even if it does not exist
+	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: kind-load
+kind-load: ## Load the built buddy-api image into the kind cluster (k8s-buddy)
+	$(KIND) load docker-image $(IMAGE) --name $(KIND_CLUSTER)
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output (leaves .tools/ intact; see `tools-clean`)

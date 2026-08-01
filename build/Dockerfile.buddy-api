@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for buddy-api. The builder stage compiles a static,
+# CGO-free binary; the final stage ships only that binary on a distroless
+# base with no shell, no package manager, and no OS userland at all.
+#
+# Build args:
+#   VERSION -- injected into main.version via -ldflags -X (see cmd/buddy-api/main.go)
+#   COMMIT  -- injected into main.commit via -ldflags -X
+# Both default to "dev"/"unknown" to match the Go source defaults if the
+# caller (normally `make docker-build`) omits them.
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+# Copy only the dependency manifests first so `go mod download` is cached
+# across builds and only re-runs when go.mod/go.sum actually change --
+# editing application source must not invalidate this layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Now bring in the rest of the source and build.
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -o /out/buddy-api \
+    ./cmd/buddy-api
+
+# ---------------------------------------------------------------------------
+# Final
+# ---------------------------------------------------------------------------
+# distroless/static-debian12:nonroot ships no shell, no package manager, and
+# no libc -- just CA certs, tzdata, and a passwd entry for uid/gid 65532. That
+# absence is deliberate: it's what makes `docker run --entrypoint sh` fail
+# (verified in Task 5's verification steps), and it's why Task 6's Deployment
+# cannot use an exec-based (command-running) preStop hook -- there is no
+# shell in this image to exec into. Any preStop hook Task 6 adds must be
+# HTTP-based instead.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/sean-kramer/k8s-buddy" \
+      org.opencontainers.image.title="buddy-api" \
+      org.opencontainers.image.description="K8s Buddy's HTTP service -- the component Kubernetes probes, chaos experiments target, and Prometheus scrapes." \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY --from=builder /out/buddy-api /buddy-api
+
+USER 65532:65532
+
+EXPOSE 8080
+
+ENTRYPOINT ["/buddy-api"]
