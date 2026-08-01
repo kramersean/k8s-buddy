@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: k8s-buddy
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+
+# app.kubernetes.io/part-of and app.kubernetes.io/managed-by are already set
+# explicitly on every object (Global Constraints requires all five standard
+# labels on every object, and kustomize's `labels` only applies uniformly),
+# so this just adds the same two cluster-identifying labels kustomize itself
+# is responsible for, confirming `managed-by: kustomize` end to end.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

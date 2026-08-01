@@ -1,0 +1,92 @@
+# Three NetworkPolicies, additive (Kubernetes NetworkPolicy rules OR
+# together for the pods they select -- there is no "deny wins" precedence):
+#
+#   1. default-deny-all matches every pod in the namespace and declares
+#      both Ingress and Egress policy types with zero rules, which is the
+#      standard idiom for "nothing is allowed except what a later policy
+#      explicitly opens up."
+#   2. allow-dns-egress punches a hole through that default-deny for DNS
+#      only: kube-dns/CoreDNS in kube-system, on both UDP/53 and TCP/53
+#      (TCP because the Go DNS resolver can and does fall back to it for
+#      truncated responses). Without this, every outbound connection would
+#      fail at the name-resolution step, not just be blocked at the
+#      destination -- the classic default-deny-breaks-DNS trap.
+#   3. allow-http-ingress punches a hole for application traffic: port 8080
+#      on buddy-api pods is reachable from any source. This is
+#      deliberately NOT scoped to "pods within this namespace" --
+#      kubectl-verified against this cluster: NodePort traffic (the path
+#      hack/demo.sh and the host `curl localhost:30080` both use) arrives
+#      at the pod SNATed to the node's IP by kube-proxy, not the original
+#      client's, so a `from: podSelector` restriction silently drops it
+#      (TCP connects, then hangs forever -- no RST, just a black hole) even
+#      though it looks correct on paper. kind's kindnet CNI does enforce
+#      NetworkPolicy in this cluster (confirmed empirically -- see the
+#      Task 6 report for how the DNS and NodePort checks were done), so an
+#      unqualified `ingress: - ports: [...]` with no `from` is a real,
+#      necessary hole, not a no-op label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-http-ingress
+  namespace: k8s-buddy
+  labels:
+    app.kubernetes.io/name: buddy-api
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: buddy-api
+      app.kubernetes.io/instance: k8s-buddy
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080

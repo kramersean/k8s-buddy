@@ -1,0 +1,22 @@
+# Namespace k8s-buddy, labeled for Pod Security Admission's `restricted`
+# profile. `enforce-version: latest` pins enforcement to whatever the
+# cluster's current Kubernetes minor version considers `restricted` --
+# deliberately drifting forward with upgrades rather than pinning to
+# whatever version this manifest happened to be written against. `audit`
+# and `warn` are set to the same level so a future manifest change that
+# would violate `restricted` is visible (audit log, apply-time warning)
+# even before it is ever enforced against something already running.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-buddy
+  labels:
+    app.kubernetes.io/name: k8s-buddy
+    app.kubernetes.io/instance: k8s-buddy
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

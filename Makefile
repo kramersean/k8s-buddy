@@ -127,8 +127,30 @@ kind-down: ## Delete the kind cluster (k8s-buddy), succeeding even if it does no
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: kind-load
-kind-load: ## Load the built buddy-api image into the kind cluster (k8s-buddy)
-	$(KIND) load docker-image $(IMAGE) --name $(KIND_CLUSTER)
+kind-load: ## Load the built buddy-api image (SHA tag and :dev) into the kind cluster (k8s-buddy)
+	$(KIND) load docker-image $(IMAGE) $(IMAGE_DEV) --name $(KIND_CLUSTER)
+
+.PHONY: deploy
+deploy: ## Apply the Kubernetes manifests (deploy/kustomize/base) to the current kubectl context
+	kubectl apply -k deploy/kustomize/base
+
+.PHONY: undeploy
+undeploy: ## Remove the Kubernetes manifests (deploy/kustomize/base) from the current kubectl context
+	kubectl delete -k deploy/kustomize/base --ignore-not-found
+
+.PHONY: status
+status: ## Show buddy-api pods/services/PDB and rollout status in the k8s-buddy namespace
+	kubectl -n k8s-buddy get pods,svc,pdb -o wide
+	kubectl -n k8s-buddy rollout status deployment/buddy-api
+
+.PHONY: logs
+logs: ## Tail logs from every buddy-api pod in the k8s-buddy namespace
+	kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 -f
+
+.PHONY: demo
+demo: kind-up docker-build kind-load deploy ## Full self-healing demo: kind-up -> docker-build -> kind-load -> deploy -> wait for rollout -> hack/demo.sh
+	kubectl -n k8s-buddy rollout status deployment/buddy-api --timeout=120s
+	bash hack/demo.sh
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output (leaves .tools/ intact; see `tools-clean`)
