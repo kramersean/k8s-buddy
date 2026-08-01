@@ -588,6 +588,112 @@ jobs:
           fi
           echo "fernie mood: $mood"
 
+      # ---------------------------------------------------------------------
+      # Task 4: admission webhooks, exercised live -- the same five checks
+      # the task's own LIVE PROOF verification runs by hand against a dev
+      # kind cluster, run here so a webhook regression (a bad
+      # +kubebuilder:webhook marker, a caBundle that never gets patched, a
+      # validating rule that stops firing) turns CI red instead of only
+      # being caught the next time someone happens to redeploy locally.
+      # ---------------------------------------------------------------------
+
+      - name: Assert both webhook configurations carry a non-empty caBundle
+        run: |
+          set -euo pipefail
+          for name in plant-operator-mutating-webhook-configuration plant-operator-validating-webhook-configuration; do
+            kind="mutatingwebhookconfiguration"
+            [[ "$name" == *validating* ]] && kind="validatingwebhookconfiguration"
+            caBundleLen="$(kubectl get "$kind" "$name" -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | wc -c)"
+            if [ "$caBundleLen" -lt 1 ]; then
+              echo "$kind/$name has an empty caBundle -- cmd/plant-operator's certificate bootstrap never patched it (see docs/adr/0009)" >&2
+              exit 1
+            fi
+            echo "confirmed: $kind/$name caBundle is populated ($caBundleLen bytes)"
+          done
+
+      - name: LIVE PROOF 1/5 -- replicas:0 is rejected with the exact message
+        run: |
+          set -euo pipefail
+          out="$(kubectl apply -f - <<'EOF' 2>&1 || true)
+          apiVersion: buddy.k8s-buddy.io/v1alpha1
+          kind: Plant
+          metadata:
+            name: ci-proof-zero-replicas
+            namespace: k8s-buddy-plants
+          spec:
+            species: fern
+            replicas: 0
+          EOF
+          )"
+          echo "$out"
+          echo "$out" | grep -qF "plants need at least one leaf" || { echo "expected rejection message not found" >&2; exit 1; }
+
+      - name: LIVE PROOF 2/5 -- a Plant with only species set comes back fully defaulted
+        run: |
+          set -euo pipefail
+          kubectl apply -f - <<'EOF'
+          apiVersion: buddy.k8s-buddy.io/v1alpha1
+          kind: Plant
+          metadata:
+            name: ci-proof-species-only
+            namespace: k8s-buddy-plants
+          spec:
+            species: orchid
+          EOF
+          kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o yaml
+          image="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.image}')"
+          replicas="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.replicas}')"
+          watering="$(kubectl -n k8s-buddy-plants get plant ci-proof-species-only -o jsonpath='{.spec.wateringInterval}')"
+          if [ "$image" != "ghcr.io/sean-kramer/k8s-buddy/buddy-api:dev" ] || [ "$replicas" != "3" ] || [ "$watering" != "30s" ]; then
+            echo "defaults were not fully applied: image=$image replicas=$replicas wateringInterval=$watering" >&2
+            exit 1
+          fi
+          kubectl -n k8s-buddy-plants delete plant ci-proof-species-only
+
+      - name: LIVE PROOF 3/5 -- changing an existing Plant's species is rejected, naming old and new values
+        run: |
+          set -euo pipefail
+          out="$(kubectl -n k8s-buddy-plants patch plant fernie --type=merge -p '{"spec":{"species":"cactus"}}' 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "immutable" || { echo "expected an immutability rejection" >&2; exit 1; }
+          echo "$out" | grep -qF "fern" || { echo "expected the old value (fern) named in the rejection" >&2; exit 1; }
+          echo "$out" | grep -qF "cactus" || { echo "expected the new value (cactus) named in the rejection" >&2; exit 1; }
+          species="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.spec.species}')"
+          if [ "$species" != "fern" ]; then
+            echo "fernie's species changed despite the rejection: $species" >&2
+            exit 1
+          fi
+
+      - name: LIVE PROOF 4/5 -- a disallowed image registry is rejected
+        run: |
+          set -euo pipefail
+          out="$(kubectl apply -f - <<'EOF' 2>&1 || true)
+          apiVersion: buddy.k8s-buddy.io/v1alpha1
+          kind: Plant
+          metadata:
+            name: ci-proof-bad-image
+            namespace: k8s-buddy-plants
+          spec:
+            species: fern
+            image: quay.io/someorg/buddy-api:dev
+          EOF
+          )"
+          echo "$out"
+          echo "$out" | grep -q "allowlist" || { echo "expected an allowlist rejection" >&2; exit 1; }
+
+      - name: LIVE PROOF 5/5 -- patching a MUTABLE field on the same Plant succeeds (immutability is scoped, not blanket)
+        run: |
+          set -euo pipefail
+          kubectl -n k8s-buddy-plants patch plant fernie --type=merge -p '{"spec":{"latencyBudget":"200ms"}}'
+          budget="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.spec.latencyBudget}')"
+          species="$(kubectl -n k8s-buddy-plants get plant fernie -o jsonpath='{.spec.species}')"
+          if [ "$budget" != "200ms" ] || [ "$species" != "fern" ]; then
+            echo "mutable-field patch did not take effect cleanly: latencyBudget=$budget species=$species" >&2
+            exit 1
+          fi
+          kubectl -n k8s-buddy-plants patch plant fernie --type=merge -p '{"spec":{"latencyBudget":"150ms"}}'
+          echo "confirmed: mutable-field update succeeded and left species untouched"
+
       # THE SERVICEACCOUNT ASSERTION. This is the one that would have caught
       # the Plan 2 regression: DeploymentFor set serviceAccountName,
       # resources_test.go asserted it on the BUILDER's output, and
