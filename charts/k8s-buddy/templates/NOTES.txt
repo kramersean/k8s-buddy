@@ -56,3 +56,13 @@ K8s Buddy's plant-operator ({{ .Chart.Name }} {{ .Chart.Version }}, app version 
    understanding that this deletes every Plant on the cluster:
 
      kubectl delete crd plants.buddy.k8s-buddy.io
+
+{{- if .Values.namespace.create }}
+
+   The "{{ include "k8s-buddy.namespace" . }}" namespace this release created also
+   survives `helm uninstall` -- Helm never deletes Namespace-kind resources on
+   uninstall, even ones it created, so it will be left behind, empty. Remove
+   it yourself if you don't want it lingering:
+
+     kubectl delete namespace {{ include "k8s-buddy.namespace" . }}
+{{- end }}

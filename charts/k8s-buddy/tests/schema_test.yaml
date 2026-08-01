@@ -54,6 +54,32 @@ tests:
       - failedTemplate:
           errorPattern: "pullPolicy"
 
+  # Everything above this point tests enums and min/max -- this is the
+  # case that proves the schema's *type* constraints are load-bearing too,
+  # not just its value constraints. Verified manually against a real `helm
+  # template` first: `--set-string replicaCount=three` fails with
+  # "at '/replicaCount': got string, want integer".
+  - it: replicaCount as a string (not an integer) is rejected
+    set:
+      replicaCount: "three"
+    asserts:
+      - failedTemplate:
+          errorPattern: "replicaCount"
+
+  # A second type-mismatch case on a different field/kind, so this isn't
+  # just replicaCount's own minimum/maximum bounds coincidentally also
+  # catching a non-numeric string -- namespace.create is a plain boolean
+  # with no enum or numeric bound at all, so this only fails if the
+  # schema's `type: boolean` constraint is actually enforced. Verified
+  # manually: `--set-string namespace.create=yes` fails with
+  # "at '/namespace/create': got string, want boolean".
+  - it: namespace.create as a string (not a boolean) is rejected
+    set:
+      namespace.create: "yes"
+    asserts:
+      - failedTemplate:
+          errorPattern: "namespace"
+
   - it: a syntactically valid, schema-conforming override still renders cleanly (control case)
     set:
       replicaCount: 2
