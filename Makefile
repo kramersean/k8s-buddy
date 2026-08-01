@@ -475,7 +475,7 @@ undeploy-chaos: ## Remove chaos-buddy's RBAC, ConfigMaps, and Deployment (deploy
 #      indenting the rule file's own `groups:` block under `spec:`.
 .PHONY: observability-install
 observability-install: ## Install kube-prometheus-stack + Loki + promtail (pinned chart versions) plus the dashboard, PrometheusRules, and RBAC (run after deploy-operator and deploy-chaos)
-	@echo "observability-install: creating namespace $(OBSERVABILITY_NAMESPACE) (PSA baseline -- see deploy/observability/namespace.yaml for why)"
+	@echo "observability-install: creating namespace $(OBSERVABILITY_NAMESPACE) (PSA privileged -- see deploy/observability/namespace.yaml for why)"
 	kubectl apply -f $(OBSERVABILITY_VALUES_DIR)/namespace.yaml
 	@echo "observability-install: adding/updating the prometheus-community and grafana chart repos"
 	@helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true

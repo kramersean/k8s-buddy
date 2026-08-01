@@ -6,7 +6,7 @@
   "tags": ["k8s-buddy"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "time": { "from": "now-1h", "to": "now" },
@@ -238,7 +238,7 @@
       "type": "timeseries",
       "title": "Container restarts",
       "description": "kube_pod_container_status_restarts_total in k8s-buddy-plants, as a rate -- a pod-kill chaos action shows up here as one restart... actually a deleted pod is REPLACED, not restarted; watch the ready-vs-desired panel above for pod-kill's own signature, and this panel for readiness-flap or crash-driven restarts.",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 7, "w": 9, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -263,7 +263,7 @@
       "type": "timeseries",
       "title": "Chaos actions",
       "description": "buddy_chaos_actions_total by mode and outcome. Each action also appears as a dashboard-wide annotation (orange marker) on every panel -- point at the marker to find the exact moment chaos hit, and at the ready-vs-desired panel's recovery to find the moment it ended.",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 7, "w": 9, "x": 9, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -297,6 +297,40 @@
         ]
       },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Time since last chaos action",
+      "description": "buddy_chaos_last_action_timestamp_seconds, the third leg of the chaos triad alongside buddy_chaos_actions_total (the panel to the left) and buddy_chaos_enabled (the kill-switch line on that same panel) -- until this panel existed, the timestamp gauge chaos-buddy exports was read by nothing at all. `> 0` excludes a mode that has never fired (its gauge sits at its zero-initialized value forever until chaos-buddy actually performs that mode at least once), and max() picks the most recent of the two modes when both have fired.",
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "time() - max(buddy_chaos_last_action_timestamp_seconds > 0)",
+          "legendFormat": "seconds since last chaos action",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no chaos action yet",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
     }
   ]
 }
