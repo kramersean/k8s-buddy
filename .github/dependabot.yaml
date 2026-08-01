@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  # Go module dependencies (go.mod / go.sum at the repo root).
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Actions used in .github/workflows/*.yaml -- keeps every pinned `uses:`
+  # tag current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # build/Dockerfile.buddy-api's base images (golang:1.26-alpine builder,
+  # gcr.io/distroless/static-debian12:nonroot runtime).
+  - package-ecosystem: "docker"
+    directory: "/build"
+    schedule:
+      interval: "weekly"

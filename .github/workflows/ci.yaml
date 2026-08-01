@@ -1,0 +1,299 @@
+name: CI
+
+# Push and pull_request against main are the only triggers -- this repo does
+# development on feature branches and merges into main, so those are the two
+# events that matter for "is this safe to merge / did main just break".
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel any in-flight run for the same ref the moment a new commit lands on
+# it, so a fast follow-up push doesn't wait behind (or race) a stale run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege at the top: nothing in this workflow needs to write to the
+# repo. Jobs that need more (build's package push, scan's SARIF-free trivy
+# runs need nothing extra) escalate individually, scoped to just that job.
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/sean-kramer/k8s-buddy/buddy-api
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint -- golangci-lint (the pinned version from the Makefile) plus a
+  # gofmt check that actually fails on unformatted files. `make fmt` rewrites
+  # files in place and would exit 0 either way, so it cannot be the CI gate --
+  # this step only ever reads.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make lint
+        run: make lint
+
+      - name: gofmt check (fails on unformatted files)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "All Go files are gofmt-formatted."
+
+  # ---------------------------------------------------------------------------
+  # test -- ubuntu-latest has a C toolchain, so this is where the race
+  # detector actually runs (the Windows dev box cannot run it). Both the
+  # race run and the coverage run execute the full suite; the coverage
+  # profile is uploaded so it is inspectable from the Actions UI.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make test-race
+        run: make test-race
+
+      - name: make test-cover
+        run: make test-cover
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-profile
+          path: coverage.out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # build -- multi-arch image build. Pushing to ghcr.io only happens on a
+  # push to main; a PR (including one from a fork) never gets push:true, so
+  # it can never publish an image using this repo's GITHUB_TOKEN. packages:
+  # write is scoped to this job alone.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute image metadata
+        id: vars
+        run: |
+          echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (push only on a push to main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.buddy-api
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ env.IMAGE }}:${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
+      # SBOM is generated from source (go.sum et al.), not from the built
+      # image: a PR build above is intentionally push:false/load:false (a
+      # multi-platform buildx build cannot be --load'ed into the local
+      # daemon), so on a PR there is no local image to point sbom-action at.
+      # A path-based SBOM works identically for both push and PR events.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: buddy-api-sbom.spdx.json
+          upload-artifact: true
+          artifact-name: buddy-api-sbom.spdx.json
+
+  # ---------------------------------------------------------------------------
+  # scan -- trivy over the filesystem (deps/config, always available) and
+  # over the built image. `needs: build` sequences this after the build job
+  # per the task brief, but the image trivy scans here is built fresh, locally,
+  # with --load: build's own image is push:false/unloaded on a PR, so there is
+  # nothing in build's job to pull, and pulling from ghcr would also require
+  # an image that a fork PR was never allowed to push. Building locally here
+  # sidesteps both problems for push and PR alike.
+  # ---------------------------------------------------------------------------
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute image metadata
+        id: vars
+        run: |
+          echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image locally for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile.buddy-api
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:scan
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:scan
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  # ---------------------------------------------------------------------------
+  # manifests -- kubeconform in strict mode against real upstream Kubernetes
+  # schemas. kubeconform does not understand kustomize overlays, so the
+  # kustomization is rendered first with `kubectl kustomize` and piped in.
+  # ---------------------------------------------------------------------------
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v5
+        with:
+          version: "v1.36.1"
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Validate deploy/kustomize/base (strict, real k8s schemas)
+        run: |
+          kubectl kustomize deploy/kustomize/base | \
+            kubeconform -strict -summary -kubernetes-version 1.36.0 -
+
+  # ---------------------------------------------------------------------------
+  # e2e -- the important one. Stands up the same 3-node kind topology CI and
+  # local dev both use, deploys buddy-api, and runs hack/demo.sh as a real
+  # assertion: it deletes a live pod and hack/demo.sh's exit code is the
+  # pass/fail signal for whether Kubernetes actually healed it. No || true,
+  # no continue-on-error -- a chaos injection that doesn't recover must turn
+  # this job red.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Same node topology, same node image, as local dev
+      # (deploy/kind/kind-config.yaml pins kindest/node:v1.36.1, 3 nodes).
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.14.0
+        with:
+          config: deploy/kind/kind-config.yaml
+          cluster_name: k8s-buddy
+          version: "v0.32.0"
+          kubectl_version: "v1.36.1"
+
+      - name: make docker-build
+        run: make docker-build
+
+      # Loads BOTH the git-SHA tag and the :dev tag -- the Deployment
+      # manifest pins buddy-api:dev, so the SHA tag alone would leave the
+      # cluster unable to schedule any pods at all.
+      - name: make kind-load
+        run: make kind-load
+
+      - name: make deploy
+        run: make deploy
+
+      - name: Wait for rollout
+        run: kubectl -n k8s-buddy rollout status deployment/buddy-api --timeout=120s
+
+      # This is the assertion. Its exit code (0 = healed, 2 = recovery
+      # timeout, 1 = missing prerequisite) IS the job's pass/fail signal.
+      - name: Run self-healing demo (chaos + recovery assertion)
+        run: bash hack/demo.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== pods ==="
+          kubectl -n k8s-buddy get pods -o wide || true
+          echo "=== describe pods ==="
+          kubectl -n k8s-buddy describe pods -l app.kubernetes.io/name=buddy-api || true
+          echo "=== logs (current) ==="
+          kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 || true
+          echo "=== logs (previous, if any container restarted) ==="
+          kubectl -n k8s-buddy logs -l app.kubernetes.io/name=buddy-api --all-containers --tail=200 --previous || true
+          echo "=== events ==="
+          kubectl -n k8s-buddy get events --sort-by=.lastTimestamp || true
