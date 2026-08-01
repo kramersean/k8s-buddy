@@ -141,10 +141,13 @@ func workMessage(outcome string, delay, budget time.Duration) string {
 	}
 }
 
-// randomWorkDelay samples a duration uniformly from
-// [WorkMinDelay, WorkMaxDelay] using the server's injected (or
-// time-seeded) *rand.Rand. cmd/buddy-api validates MinDelay <= MaxDelay
-// at startup; the equal-or-inverted-bounds fallback here only guards
+// randomWorkDelay samples a duration uniformly from the CLOSED interval
+// [WorkMinDelay, WorkMaxDelay] -- both endpoints included -- using the
+// server's injected (or time-seeded) *rand.Rand. Int63n(n) itself only
+// ever returns a half-open [0,n), so span+1 is passed rather than span,
+// making WorkMaxDelay itself a reachable outcome and not an off-by-one
+// exclusive bound. cmd/buddy-api validates MinDelay <= MaxDelay at
+// startup; the equal-or-inverted-bounds fallback here only guards
 // callers -- tests, mainly -- that build a Config directly without going
 // through that validation.
 func (s *Server) randomWorkDelay() time.Duration {
@@ -159,7 +162,7 @@ func (s *Server) randomWorkDelay() time.Duration {
 	defer s.randMu.Unlock()
 	//nolint:gosec // G404: simulated /work latency, not security-sensitive;
 	// the source is intentionally injectable (Config.Rand) for test determinism.
-	return lo + time.Duration(s.rand.Int63n(span))
+	return lo + time.Duration(s.rand.Int63n(span+1))
 }
 
 // sampleWorkOutcome classifies a /work request given its already-sampled

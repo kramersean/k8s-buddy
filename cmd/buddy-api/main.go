@@ -61,6 +61,13 @@ const (
 // time.
 const shutdownDrainTimeout = 15 * time.Second
 
+// serveGoroutineDrainTimeout bounds how long run() waits, after
+// gracefulShutdown returns, for the ListenAndServe goroutine to report
+// its final result. httpServer.Shutdown has already returned by that
+// point, so the goroutine should exit essentially immediately; this is
+// only a safety ceiling against it never doing so.
+const serveGoroutineDrainTimeout = 2 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		// The structured logger normally used for everything else may not
@@ -153,7 +160,27 @@ func run() error {
 	case <-sigCtx.Done():
 	}
 
-	return gracefulShutdown(httpServer, srv, logger, cfg.shutdownDelay)
+	shutdownErr := gracefulShutdown(httpServer, srv, logger, cfg.shutdownDelay)
+
+	// httpServer.Shutdown (inside gracefulShutdown) closes the listener,
+	// which unblocks the ListenAndServe goroutine above and makes it send
+	// its result on serveErrs. That goroutine already normalizes the
+	// expected http.ErrServerClosed to nil before sending, so draining
+	// here surfaces only a genuinely unexpected listener error -- one
+	// that would otherwise sit in the buffered channel and be silently
+	// discarded when this function returns. The drain is bounded so a
+	// bug that somehow keeps the goroutine from ever sending can't hang
+	// process shutdown.
+	select {
+	case serveErr := <-serveErrs:
+		if serveErr != nil {
+			logger.Error("http server reported an error during shutdown", "error", serveErr)
+		}
+	case <-time.After(serveGoroutineDrainTimeout):
+		logger.Warn("timed out waiting for the http server goroutine to exit after shutdown")
+	}
+
+	return shutdownErr
 }
 
 // gracefulShutdown runs buddy-api's shutdown sequence in the exact order
@@ -266,9 +293,30 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("invalid BUDDY_PORT: %d is not a valid TCP port (1-65535)", cfg.port)
 	}
 
-	if cfg.latencyBudget, err = parseDurationEnv("BUDDY_LATENCY_BUDGET", 250*time.Millisecond); err != nil {
+	// 150ms, not the plan's original 250ms: with the shipped
+	// BUDDY_WORK_MAX_DELAY of 200ms, a 250ms budget would sit above every
+	// possible sampled delay, making the "warning" outcome mathematically
+	// unreachable under default configuration -- the demo could never
+	// show it. 150ms sits strictly inside [WorkMinDelay, WorkMaxDelay],
+	// so a sampled delay above budget is a real, reachable outcome. See
+	// TestWork_ShippedDefaults_WarningIsReachable in internal/api for the
+	// regression guard against this becoming unreachable again.
+	if cfg.latencyBudget, err = parseDurationEnv("BUDDY_LATENCY_BUDGET", 150*time.Millisecond); err != nil {
 		return config{}, err
 	}
+	// A non-positive budget isn't a valid "small budget", it's a
+	// different feature entirely: mood.Signals.Score treats
+	// LatencyBudget <= 0 as "no budget configured" (full latency marks
+	// always awarded), and sampleWorkOutcome can never classify anything
+	// as a warning. Silently accepting e.g. BUDDY_LATENCY_BUDGET=-1s
+	// would quietly disable an entire outcome class -- exactly the
+	// silent-fallback failure mode this file's validation exists to
+	// prevent, just arriving through a duration instead of a missing
+	// variable.
+	if cfg.latencyBudget <= 0 {
+		return config{}, fmt.Errorf("invalid BUDDY_LATENCY_BUDGET: %s must be a positive duration", cfg.latencyBudget)
+	}
+
 	if cfg.workErrorRate, err = parseFloatEnv("BUDDY_WORK_ERROR_RATE", 0.05); err != nil {
 		return config{}, err
 	}
@@ -279,8 +327,14 @@ func loadConfig() (config, error) {
 	if cfg.workMinDelay, err = parseDurationEnv("BUDDY_WORK_MIN_DELAY", 10*time.Millisecond); err != nil {
 		return config{}, err
 	}
+	if cfg.workMinDelay < 0 {
+		return config{}, fmt.Errorf("invalid BUDDY_WORK_MIN_DELAY: %s must not be negative", cfg.workMinDelay)
+	}
 	if cfg.workMaxDelay, err = parseDurationEnv("BUDDY_WORK_MAX_DELAY", 200*time.Millisecond); err != nil {
 		return config{}, err
+	}
+	if cfg.workMaxDelay < 0 {
+		return config{}, fmt.Errorf("invalid BUDDY_WORK_MAX_DELAY: %s must not be negative", cfg.workMaxDelay)
 	}
 	if cfg.workMinDelay > cfg.workMaxDelay {
 		return config{}, fmt.Errorf(
@@ -294,6 +348,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.shutdownDelay, err = parseDurationEnv("BUDDY_SHUTDOWN_DELAY", 5*time.Second); err != nil {
 		return config{}, err
+	}
+	if cfg.shutdownDelay < 0 {
+		return config{}, fmt.Errorf("invalid BUDDY_SHUTDOWN_DELAY: %s must not be negative", cfg.shutdownDelay)
 	}
 
 	return cfg, nil

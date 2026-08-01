@@ -289,6 +289,50 @@ func TestWork_DelayExceedsBudget_ReturnsDistinctWarningBody(t *testing.T) {
 	require.Equal(t, 1.0, metric.GetCounter().GetValue())
 }
 
+// TestWork_ShippedDefaults_WarningIsReachable is a regression guard for a
+// defect the plan itself once had: with the original 250ms
+// BUDDY_LATENCY_BUDGET default and a 200ms BUDDY_WORK_MAX_DELAY, no
+// sampled delay could ever exceed the budget, so /work's "warning"
+// outcome was mathematically unreachable under default configuration --
+// the demo could never show it. cmd/buddy-api's shipped defaults now
+// satisfy LatencyBudget < WorkMaxDelay; this test pins both that
+// structural relationship and the resulting classification behavior so
+// neither can silently regress. The three constants below intentionally
+// mirror cmd/buddy-api/main.go's loadConfig defaults for
+// BUDDY_LATENCY_BUDGET, BUDDY_WORK_MIN_DELAY, and BUDDY_WORK_MAX_DELAY --
+// keep them in sync if those defaults ever change.
+func TestWork_ShippedDefaults_WarningIsReachable(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shippedLatencyBudget = 150 * time.Millisecond
+		shippedWorkMinDelay  = 10 * time.Millisecond
+		shippedWorkMaxDelay  = 200 * time.Millisecond
+	)
+
+	require.Less(t, shippedLatencyBudget, shippedWorkMaxDelay,
+		"the shipped budget must be strictly below the shipped max delay, "+
+			"or no sampled delay can ever exceed it and 'warning' becomes unreachable")
+
+	s, _ := newTestServer(t, Config{
+		WorkErrorRate: 0.0, // isolate the delay/budget boundary from the independent error roll
+		LatencyBudget: shippedLatencyBudget,
+		WorkMinDelay:  shippedWorkMinDelay,
+		WorkMaxDelay:  shippedWorkMaxDelay,
+	})
+
+	// 180ms is within [WorkMinDelay, WorkMaxDelay] (so randomWorkDelay can
+	// actually produce it) and above LatencyBudget -- exactly the
+	// scenario that must classify as a warning.
+	const reachableOverBudgetDelay = 180 * time.Millisecond
+	require.GreaterOrEqual(t, reachableOverBudgetDelay, shippedWorkMinDelay)
+	require.LessOrEqual(t, reachableOverBudgetDelay, shippedWorkMaxDelay)
+
+	outcome, status := s.sampleWorkOutcome(reachableOverBudgetDelay)
+	require.Equal(t, workOutcomeWarning, outcome)
+	require.Equal(t, http.StatusOK, status)
+}
+
 // -- /chaos/readiness ---------------------------------------------------
 
 func TestChaosReadiness_NotRegistered_WhenDisabled(t *testing.T) {
