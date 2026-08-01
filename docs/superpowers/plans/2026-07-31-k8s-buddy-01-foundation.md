@@ -419,6 +419,15 @@ and `kubectl get nodes` shows 3 `Ready`; `make kind-load` succeeds.
   `demo` (= `kind-up` → `docker-build` → `kind-load` → `deploy` → wait for rollout
   → `hack/demo.sh`), `status`, `logs`.
 
+**Graceful-shutdown verification (added after Task 4).** Windows cannot deliver a
+real SIGTERM to a console-less child process, so Task 4 could not exercise the
+shutdown path end to end. Linux containers can, and `kubectl delete pod` sends a
+genuine SIGTERM — so this task is where that behavior gets proven. Capture the
+terminating pod's logs during deletion and confirm the phases appear in order:
+readiness flipped false → shutdown delay elapsed → server drained → exit. Paste
+the log lines into the report. If the ordering is wrong, or a phase is missing,
+that is a Critical finding against Task 4, not a Task 6 defect.
+
 **Verify (run these for real, do not assume):**
 `kubectl apply -k deploy/kustomize/base --dry-run=client` clean;
 `make demo` end-to-end on the real kind cluster;
