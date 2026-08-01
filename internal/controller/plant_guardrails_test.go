@@ -122,19 +122,22 @@ func TestReconcile_RefusesToAdoptForeignDeployment(t *testing.T) {
 // this: an object with NEITHER a matching owner reference NOR the label is
 // still somebody else's, and is still refused.
 //
-// HONEST LIMITATION, worth stating because it bit exactly here. Reordering
-// the checks was only HALF the fix, and this test cannot see the other half.
-// The deployed operator narrows its informer cache by that same managed-by
-// label; this suite's manager does not (it sets no cache.Options at all). So
-// on a live cluster a de-labelled child also vanishes from the cache, a
-// CACHED read reports NotFound, and CreateOrUpdate tried to create an object
-// that already exists -- `deployments.apps "fernie" already exists`, on
-// backoff, forever -- with the label still never restored. This test passed
-// against that broken build. applyChild reading through the uncached
-// APIReader is what actually closes it, and the live-cluster check recorded
-// in the task report is what proves it; a faithful envtest reproduction would
-// need this suite to mirror the deployed cache configuration, which is
-// noted as follow-up work rather than done here.
+// Reordering the checks was only HALF the fix, and the other half is why this
+// test's fidelity matters more than most. The deployed operator narrows its
+// informer cache by that same managed-by label, so on a live cluster a
+// de-labelled child ALSO vanishes from the cache: a cached read reports
+// NotFound, CreateOrUpdate takes the create path, and the API server rejects
+// it -- `deployments.apps "fernie" already exists`, on backoff, forever, with
+// the label still never restored. applyChild reading through the uncached
+// APIReader is what closes that.
+//
+// This test could not see any of it, because the suite's manager used to set
+// no cache.Options at all and therefore cached everything unfiltered. It
+// passed against a build that was demonstrably broken on a real cluster. The
+// suite now builds its manager from the SAME CacheOptions() the deployed
+// binary uses (see suite_test.go and cache.go), so that gap is closed:
+// reverting applyChild to CreateOrUpdate makes THIS test fail, with exactly
+// the message below. That was verified, not assumed.
 func TestReconcile_RestoresStrippedManagedByLabelWithoutDegrading(t *testing.T) {
 	ns := newTestNamespace(t)
 	plant := newTestPlant(ns, "relabelled", 3)

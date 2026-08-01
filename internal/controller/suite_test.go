@@ -146,6 +146,25 @@ func runSuite(m *testing.M) int {
 
 	testMgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: testScheme,
+		// THE SAME cache configuration the deployed binary uses -- the
+		// shared CacheOptions() in cache.go, called by both, never a copy.
+		//
+		// This suite previously passed no Cache option at all, so it cached
+		// every child object unfiltered while cmd/plant-operator cached only
+		// those labelled app.kubernetes.io/managed-by=plant-operator. That
+		// difference was not cosmetic: it made the suite structurally unable
+		// to reproduce any bug whose mechanism is "the cache cannot see this
+		// object," which is exactly the class of bug the label filter
+		// introduces. A test asserting that a de-labelled child gets its
+		// label restored passed here while the same scenario wedged the real
+		// operator in an AlreadyExists loop forever.
+		//
+		// Mirroring the deployed configuration means objects created bare or
+		// unlabelled by a test are now invisible to the manager's cache, the
+		// same way they are invisible in production. That is correct and is
+		// the point. Tests that need to observe such an object read through
+		// testClient (a direct, uncached client) rather than loosening this.
+		Cache: CacheOptions(),
 		// "0" disables the metrics HTTP server and health-probe HTTP
 		// server entirely -- this suite reads the reconcile-count metric
 		// straight out of the in-process prometheus registry (see

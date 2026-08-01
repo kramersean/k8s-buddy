@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -824,8 +825,50 @@ func (r *PlantReconciler) reconcileStatus(ctx context.Context, plant *buddyv1alp
 
 	r.emitHealthEvents(plant, oldStatus, newStatus)
 
+	// RETRY THE WRITE, NOT THE DECISION. Everything above this line —
+	// computeStatus, the statusChanged gate, the health Events — has already
+	// run exactly once and stays that way. Only the Status().Update is
+	// retried, and only on a Conflict.
+	//
+	// The conflict is real and routine: the operator's own status write can
+	// lose a race against a concurrent edit to the same object (most visibly
+	// during a rapid create-then-scale, where a spec update lands between
+	// this reconcile's Get and its status write). Without the retry the
+	// reconcile returns an error, controller-runtime logs a full
+	// "Reconciler error" line with a stack trace, and the next pass fixes it
+	// ~5ms later — self-healing, but it puts an alarming-looking error in
+	// the log of an operator that is working correctly, which is exactly the
+	// thing a reviewer reading a demo transcript would stop on.
+	//
+	// On conflict the in-memory copy's resourceVersion is stale, so retrying
+	// the same object would fail identically forever. The refresh below
+	// re-reads through the UNCACHED reader — a cached read moments after a
+	// conflict is liable to return the very version that just lost, turning
+	// the retry into a no-op — and re-applies the status this pass already
+	// decided on.
 	plant.Status = newStatus
-	if err := r.Status().Update(ctx, plant); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		updateErr := r.Status().Update(ctx, plant)
+		if updateErr == nil || !apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		latest := &buddyv1alpha1.Plant{}
+		if getErr := reader.Get(ctx, client.ObjectKeyFromObject(plant), latest); getErr != nil {
+			return getErr
+		}
+		latest.Status = newStatus
+		*plant = *latest
+
+		// Returned so RetryOnConflict recognizes a conflict and calls this
+		// again, now against the refreshed object.
+		return updateErr
+	})
+	if err != nil {
 		return fmt.Errorf("updating status for plant %s/%s: %w", plant.Namespace, plant.Name, err)
 	}
 	return nil
