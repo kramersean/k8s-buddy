@@ -192,3 +192,45 @@ func FromScore(score float64) Mood {
 		return MoodWilting
 	}
 }
+
+// now returns the current time. It is a package-level indirection purely so
+// tests can stub it out and assert an exact, deterministic CheckedAt value
+// instead of racing the real clock.
+var now = time.Now
+
+// Report is the /status response body.
+type Report struct {
+	Mood        Mood      `json:"mood"`
+	Message     string    `json:"message"`
+	HealthScore float64   `json:"healthScore"`
+	Ready       bool      `json:"ready"`
+	Species     string    `json:"species"`
+	Name        string    `json:"name"`
+	Uptime      string    `json:"uptime"`
+	CheckedAt   time.Time `json:"checkedAt"`
+}
+
+// NewReport builds a Report from s, name, species, and uptime. It derives
+// HealthScore, Mood, and Message from a single call to s.Score(), so the
+// three can never disagree with one another the way they could if a caller
+// computed the score, mood, and message separately and one of the three
+// drifted out of sync. Uptime is formatted with time.Duration's own String
+// method (e.g. "1h2m3s") rather than a custom format, keeping the /status
+// response consistent with how Go durations are conventionally rendered
+// elsewhere in logs and tooling. CheckedAt is read through the package-level
+// now indirection so tests can stub it.
+func NewReport(s Signals, name, species string, uptime time.Duration) Report {
+	score := s.Score()
+	m := FromScore(score)
+
+	return Report{
+		Mood:        m,
+		Message:     m.Message(),
+		HealthScore: score,
+		Ready:       s.Ready,
+		Species:     species,
+		Name:        name,
+		Uptime:      uptime.String(),
+		CheckedAt:   now(),
+	}
+}
