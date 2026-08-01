@@ -9,6 +9,10 @@ A Kubernetes operator, in the shape of a talking plant, that proves it understan
 
 K8s Buddy turns a simulated "plant" workload into a Kubernetes `Custom Resource`: applying a `Plant` manifest causes a purpose-built operator to create and continuously reconcile a Deployment, Service, ConfigMap, PodDisruptionBudget, ServiceAccount, NetworkPolicy, and (when Prometheus is installed) a ServiceMonitor, then report the workload's aggregate mood and health back onto `Plant.status`. A narrowly-RBAC'd chaos injector wilts the plant on command, and Kubernetes — not this project's own code — brings it back, with Prometheus, Grafana, and Loki recording the whole arc. It demonstrates CRDs with OpenAPI/CEL validation, controller-runtime reconciliation with owner-reference garbage collection, admission webhooks, least-privilege RBAC, and multi-window SLO alerting as genuinely exercised properties of a running cluster, not claims in a slide deck.
 
+![kubectl apply a Plant, watch it reach 3/3, kill all its pods, and watch Kubernetes take it back to 3/3 in about 4 seconds](docs/images/demo.svg)
+
+`kubectl apply` a `Plant`, watch it reach `READY 3/3`, delete all of its pods, and watch it recover — real recovery time in this take is ~4 seconds (delete at 7.0s, back to `3/3` at 11.1s), timed from `docs/images/demo.cast`, the raw asciicast this SVG was rendered from, recorded live against the cluster this README was built against, not hand-authored.
+
 ## The hook
 
 ```console
