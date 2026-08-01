@@ -79,9 +79,9 @@ COPY --from=builder /out/plant-operator /plant-operator
 
 USER 65532:65532
 
-# 8081: metrics. 8082: health/readiness probes. Per the operator plan's
-# Global Constraints -- webhooks on 9443 are Plan 3 and this image exposes
-# nothing there.
-EXPOSE 8081 8082
+# 8081: metrics. 8082: health/readiness probes. 9443: the admission webhook
+# server (Plan 3 Task 4 -- see cmd/plant-operator/webhookcerts.go and
+# docs/adr/0009-webhook-certificate-strategy.md).
+EXPOSE 8081 8082 9443
 
 ENTRYPOINT ["/plant-operator"]
