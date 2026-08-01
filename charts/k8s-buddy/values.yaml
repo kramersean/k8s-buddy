@@ -1,0 +1,153 @@
+# Default values for the k8s-buddy chart: the plant-operator itself, its
+# RBAC, and (opt-in) one sample Plant. See values.schema.json for the exact
+# constraints Helm enforces on every field below before a release is ever
+# created -- a malformed override is rejected at `helm install`/`helm
+# template` time, not rendered into a broken manifest.
+#
+# Every resource this chart creates lands in `.Release.Namespace` (the
+# namespace passed via `helm install -n ...`), never a hardcoded namespace
+# name -- see namespace.create below for why, and templates/_helpers.tpl for
+# how cluster-scoped object names (ClusterRole, ClusterRoleBinding) stay
+# release-scoped so two independent installs of this chart, in two different
+# namespaces, can never collide.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Whether this release creates its own target namespace (`.Release.Namespace`,
+# labeled for Pod Security Admission's `restricted` profile, matching every
+# other namespace this project runs a workload in -- see
+# deploy/kustomize/operator/namespace.yaml, which this template mirrors).
+# Leave this on and pass `--create-namespace` to `helm install`: Helm creates
+# the bare namespace first, and this chart's own Namespace template then
+# applies the PSA labels on top of it as part of the same release -- verified
+# safe against Helm 4 (no ownership-metadata conflict) as part of this
+# chart's own test matrix.
+namespace:
+  create: true
+
+image:
+  repository: ghcr.io/sean-kramer/k8s-buddy/plant-operator
+  # Untagged by default, same convention every kustomize manifest in this
+  # repo uses (see deploy/kustomize/operator/kustomization.yaml): "dev" here
+  # is a placeholder a real install always overrides, either via
+  # `--set image.tag=<sha>` or a values file, with the immutable git SHA of
+  # the build being deployed.
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# 1, not N: leader election (LeaderElectionID "plant-operator.buddy.k8s-buddy.io",
+# wired in cmd/plant-operator/main.go) makes running more than one replica
+# *safe* -- only one ever holds the lease and reconciles at a time -- but
+# nothing about this project's availability needs justifies the extra idle
+# replica by default. See values.schema.json for the bound this is checked
+# against (minimum 1, maximum 5: enough headroom for a deliberately-scaled
+# warm-standby demo without turning the field into an unbounded knob).
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+# Pod-level security context. Unlike every generated Plant workload (which
+# sets automountServiceAccountToken: false), the operator's whole job is
+# calling the Kubernetes API, so that field is deliberately left unset here
+# too (mirroring deploy/kustomize/operator/deployment.yaml's own comment on
+# why) -- rbac.yaml/the ClusterRole below is what actually bounds what the
+# mounted token can do.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level hardened security context -- identical to the posture
+# every buddy-api workload runs under (internal/controller/resources.go's
+# DeploymentFor, deploy/kustomize/base/deployment.yaml), so the operator's
+# own pod is admissible under the same PodSecurity `restricted` profile it
+# expects every Plant's namespace to enforce.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+serviceAccount:
+  # Whether a ServiceAccount is created for the operator's Deployment. When
+  # false, `serviceAccount.name` must name one that already exists.
+  create: true
+  # Overrides the generated ServiceAccount name. Empty means
+  # "<fullname>" (see templates/_helpers.tpl's k8s-buddy.serviceAccountName).
+  name: ""
+
+# Whether this release creates the operator's RBAC: the ClusterRole granting
+# it permission to reconcile Plants and their six/seven owned children
+# (config/rbac/role.yaml, reproduced verbatim in
+# templates/clusterrole.yaml -- see that file's own header comment for why
+# it must never be hand-edited independently of the source it's generated
+# from), its ClusterRoleBinding, and the namespaced leader-election Role and
+# RoleBinding. Turn this off only if RBAC is managed by some other process
+# (e.g. a cluster-admin-owned Terraform module) outside this release.
+rbac:
+  create: true
+
+leaderElection:
+  enabled: true
+
+metrics:
+  # --metrics-bind-address port on the operator container, and the port its
+  # Service exposes for Prometheus to scrape -- matches
+  # deploy/kustomize/operator/deployment.yaml and service.yaml exactly.
+  port: 8081
+
+probes:
+  # --health-probe-bind-address port; serves /healthz and /readyz.
+  port: 8082
+
+# The optional sample Plant, disabled by default so a plain `helm install`
+# deploys only the operator and its CRD -- a Custom Resource is data a
+# cluster-admin usually wants to choose deliberately, not something an
+# operator chart should create as a side effect of being installed.
+#
+# When enabled, the Plant (and, if plant.namespace.create is true, its own
+# namespace) land in `.Release.Namespace` by default -- deliberately NOT the
+# `k8s-buddy-plants` namespace deploy/kustomize/plants/namespace.yaml owns,
+# so this chart's sample Plant can never collide with a Plant already
+# running there. Set plant.namespace.name to "k8s-buddy-plants" (and leave
+# plant.namespace.create: false, since that namespace already exists on a
+# cluster where the kustomize path has been deployed) to instead land the
+# sample alongside the project's own demo Plants.
+plant:
+  enabled: false
+  # The Plant's own metadata.name is "<fullname>-<plant.name>" (see
+  # templates/plant.yaml) so it can never collide with fernie/spike/stormy
+  # (config/samples/), which use bare names.
+  name: sample
+  namespace:
+    # Empty string means "use .Release.Namespace" (see templates/plant.yaml).
+    name: ""
+    create: false
+  species: fern
+  replicas: 1
+  resourceProfile: small
+  # Left empty so the CRD's own +kubebuilder:default values apply (see
+  # config/crd/bases/buddy.k8s-buddy.io_plants.yaml) -- set explicitly only
+  # to override them.
+  image: ""
+  wateringInterval: ""
+  latencyBudget: ""
+  chaos:
+    enableEndpoints: false

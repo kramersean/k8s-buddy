@@ -1,0 +1,58 @@
+{{- if .Values.plant.enabled }}
+{{- $plantName := printf "%s-%s" (include "k8s-buddy.fullname" .) .Values.plant.name }}
+{{- $plantNs := include "k8s-buddy.plantNamespace" . }}
+{{- if .Values.plant.namespace.create }}
+# Mirrors deploy/kustomize/plants/namespace.yaml's own PSA `restricted`
+# posture: a Plant applied into a namespace without these labels would let
+# the operator's generated pod be strictly LESS constrained than every other
+# workload in this project.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $plantNs }}
+  labels:
+    app.kubernetes.io/name: {{ $plantNs }}
+    app.kubernetes.io/instance: {{ $plantNs }}
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+{{- end }}
+# An optional sample Plant, off by default (plant.enabled: false) -- a
+# Custom Resource is data a cluster-admin should choose to create
+# deliberately, not a side effect of installing the operator that reconciles
+# it. Named "<fullname>-<plant.name>" so it can never collide with
+# config/samples/'s own fernie/spike/stormy, and lands in
+# .Release.Namespace by default (never the kustomize path's own
+# k8s-buddy-plants) -- see values.yaml's plant.namespace comment.
+apiVersion: buddy.k8s-buddy.io/v1alpha1
+kind: Plant
+metadata:
+  name: {{ $plantName }}
+  namespace: {{ $plantNs }}
+  labels:
+    app.kubernetes.io/name: {{ $plantName }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: k8s-buddy
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  species: {{ .Values.plant.species }}
+  replicas: {{ .Values.plant.replicas }}
+  resourceProfile: {{ .Values.plant.resourceProfile }}
+  {{- if .Values.plant.image }}
+  image: {{ .Values.plant.image }}
+  {{- end }}
+  {{- if .Values.plant.wateringInterval }}
+  wateringInterval: {{ .Values.plant.wateringInterval | quote }}
+  {{- end }}
+  {{- if .Values.plant.latencyBudget }}
+  latencyBudget: {{ .Values.plant.latencyBudget | quote }}
+  {{- end }}
+  chaos:
+    enableEndpoints: {{ .Values.plant.chaos.enableEndpoints }}
+{{- end }}

@@ -1,0 +1,23 @@
+{{- if .Values.namespace.create }}
+# Labeled for Pod Security Admission's `restricted` profile -- same posture,
+# same reasoning, as deploy/kustomize/operator/namespace.yaml: the
+# operator's own pod (templates/deployment.yaml) carries the same hardened
+# security context every generated Plant workload does, and must be
+# admissible under `restricted` just the same.
+#
+# Safe to combine with `helm install --create-namespace`: Helm creates the
+# bare namespace first (no PSA labels), and this template then applies on
+# top of it as part of the very same release -- verified against Helm 4
+# with no ownership-metadata conflict (see the chart tests for the
+# reasoning `helm template` alone cannot exercise).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "k8s-buddy.namespace" . }}
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+{{- end }}

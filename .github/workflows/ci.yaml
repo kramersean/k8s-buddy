@@ -305,6 +305,9 @@ jobs:
   # manifests -- kubeconform in strict mode against real upstream Kubernetes
   # schemas. kubeconform does not understand kustomize overlays, so the
   # kustomization is rendered first with `kubectl kustomize` and piped in.
+  # Also covers the Helm chart (charts/k8s-buddy): lint, `helm template`
+  # piped through kubeconform, the helm-unittest suite, and the two new
+  # `dev`/`prod` Kustomize overlays.
   # ---------------------------------------------------------------------------
   manifests:
     name: manifests
@@ -314,10 +317,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Set up kubectl
         uses: azure/setup-kubectl@v5
         with:
           version: "v1.36.1"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v4.2.3"
 
       - name: Install kubeconform
         run: |
@@ -351,6 +365,67 @@ jobs:
           set -euo pipefail
           kubectl kustomize deploy/kustomize/plants | \
             kubeconform -strict -summary -kubernetes-version 1.36.1 -
+
+      # dev and prod both layer on deploy/kustomize/base -- see
+      # deploy/kustomize/overlays/{dev,prod}/kustomization.yaml for what
+      # each one patches (replicas, resources, log level, PDB shape,
+      # topologySpreadConstraints). `make kustomize-build-overlays` runs
+      # both through the same strict kubeconform check as every other
+      # kustomization in this job.
+      - name: Validate deploy/kustomize/overlays/{dev,prod} (strict, real k8s schemas)
+        shell: bash
+        run: make kustomize-build-overlays
+
+      # Regenerates charts/k8s-buddy/crds/buddy.k8s-buddy.io_plants.yaml
+      # from config/crd/bases (which `make manifests`, run in the `lint` job,
+      # already asserts has no drift against the +kubebuilder markers) and
+      # fails if the chart's own copy is stale -- the exact same
+      # `git diff --exit-code` drift-gate pattern the `lint` job's own
+      # "make manifests generate" step uses, applied to the one artifact
+      # that gate doesn't cover (a Helm chart's crds/ directory is never
+      # touched by controller-gen).
+      - name: make helm-sync-crd (assert the chart's CRD has no drift against config/crd/bases)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make helm-sync-crd
+          git diff --exit-code charts/k8s-buddy/crds
+
+      - name: helm lint charts/k8s-buddy
+        run: make helm-lint
+
+      # config/rbac/role.yaml is generated from +kubebuilder:rbac markers
+      # and already drift-gated by the `lint` job's own "make manifests
+      # generate" step. charts/k8s-buddy/templates/clusterrole.yaml is a
+      # hand-maintained mirror of those same rules (a Helm template, not a
+      # generated artifact -- controller-gen has no notion of Helm), so it
+      # needs its own drift gate. See hack/check-helm-rbac-drift.py.
+      - name: Assert the chart's ClusterRole has not drifted from config/rbac/role.yaml
+        run: |
+          python3 -m pip install --quiet pyyaml
+          make helm-rbac-drift-check
+
+      # Renders the chart (with the optional sample Plant turned on, so
+      # every template is exercised) and validates the output the same way
+      # every kustomization above is validated. See the Makefile's
+      # helm-template target for why Plant itself is `-skip`ped: kubeconform
+      # has no schema for this project's own CRD.
+      - name: helm template charts/k8s-buddy | kubeconform -strict
+        run: make helm-template
+
+      - name: Install the helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --verify=false
+
+      - name: helm unittest charts/k8s-buddy
+        run: make helm-test
+
+      # helm install --dry-run into a scratch release/namespace name --
+      # never k8s-buddy-system, which this job never even creates. Proves
+      # the chart installs cleanly (values.schema.json accepts the default
+      # values, every template renders, Helm's own dry-run simulation
+      # succeeds) without touching a live cluster -- CI has none in this job.
+      - name: helm install --dry-run into a scratch namespace/release
+        run: make helm-install-dry
 
   # ---------------------------------------------------------------------------
   # e2e -- the important one. Stands up the same 3-node kind topology CI and

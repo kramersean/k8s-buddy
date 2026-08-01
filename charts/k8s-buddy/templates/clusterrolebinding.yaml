@@ -1,0 +1,23 @@
+{{- if .Values.rbac.create }}
+# Binds the ClusterRole above to the operator's ServiceAccount. A
+# ClusterRoleBinding, not a namespaced RoleBinding, because
+# <fullname>-manager-role is itself a ClusterRole: this operator's manager
+# watches Plants across every namespace by default (never given a
+# --namespace flag), so its permissions must be grantable cluster-wide even
+# though every individual verb in that role is scoped to a small set of
+# resources -- least privilege in WHAT it can touch, not WHERE.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-manager-rolebinding
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "k8s-buddy.fullname" . }}-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "k8s-buddy.serviceAccountName" . }}
+    namespace: {{ include "k8s-buddy.namespace" . }}
+{{- end }}

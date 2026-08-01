@@ -1,0 +1,60 @@
+# dev: a laptop-friendly overlay on top of deploy/kustomize/base's
+# production-shaped defaults (3 replicas, minAvailable: 2 PDB, info logging).
+# Layers three changes over the base, each in its own patch file/inline
+# patch so a reviewer can see exactly what "dev" means without diffing the
+# base by hand:
+#
+#   1. deployment-dev.yaml -- replicas: 1, and a Burstable-QoS resource
+#      envelope (low requests, generous limit headroom) instead of the
+#      base's tight requests==limits-adjacent numbers -- cheap to schedule
+#      on a 3-node kind cluster shared with everything else this project
+#      also runs, and roomy enough for an attached debugger/profiler to not
+#      immediately hit an OOM/throttle.
+#   2. configmap-dev.yaml -- BUDDY_LOG_LEVEL: debug, merged over the base
+#      ConfigMap's "info" default.
+#   3. pdb-dev.yaml -- see its own comment below for why this one is not
+#      optional: the base's minAvailable: 2 PDB, left unpatched against 1
+#      replica, would permanently block every voluntary disruption (a drain,
+#      an eviction) rather than merely constraining it, because 1 running
+#      pod can never satisfy "at least 2 available."
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: deployment-dev.yaml
+  - path: configmap-dev.yaml
+
+  # The base's PodDisruptionBudget (deploy/kustomize/base/pdb.yaml) sets
+  # minAvailable: 2, sized for the base's own 3 replicas so a voluntary
+  # disruption can never take down more than one pod at a time. Applied
+  # unchanged against this overlay's replicas: 1, "at least 2 available" is
+  # impossible to satisfy even when the one pod is healthy -- the PDB's
+  # disruptionsAllowed sits at 0 permanently, and `kubectl drain`/`evict`
+  # (anything going through the eviction API, not a raw delete) is blocked
+  # forever, not just "constrained." That is a strictly worse outcome than
+  # having no PDB at all in a single-replica dev overlay, where a blocked
+  # drain has no bystander it's protecting.
+  #
+  # minAvailable and maxUnavailable are mutually exclusive on a
+  # PodDisruptionBudget, so a strategic-merge patch (which only ever adds or
+  # overwrites keys) cannot express this -- it would try to set both and the
+  # apply would be rejected. A JSON6902 patch can remove the old key before
+  # adding the new one.
+  - target:
+      kind: PodDisruptionBudget
+      name: buddy-api
+    patch: |-
+      - op: remove
+        path: /spec/minAvailable
+      - op: add
+        path: /spec/maxUnavailable
+        value: 1
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: k8s-buddy
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

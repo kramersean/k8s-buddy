@@ -1,0 +1,92 @@
+suite: RBAC is release-scoped (no collision with the kustomize path or another release)
+templates:
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
+  - leader-election-rbac.yaml
+  - serviceaccount.yaml
+tests:
+  - it: the ClusterRole is named from the release, not the kustomize path's hardcoded plant-operator-role
+    release:
+      name: k8s-buddy-test
+      namespace: k8s-buddy-charttest
+    template: clusterrole.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-test-manager-role
+      - notEqual:
+          path: metadata.name
+          value: plant-operator-role
+
+  - it: a different release name produces a different ClusterRole name (no collision between two installs)
+    release:
+      name: some-other-release
+      namespace: some-other-ns
+    template: clusterrole.yaml
+    asserts:
+      # k8s-buddy.fullname follows the standard `helm create` convention:
+      # release name + chart name, unless the release name already contains
+      # the chart name. "some-other-release" doesn't contain "k8s-buddy", so
+      # the chart name is appended -- still fully release-scoped, and still
+      # guaranteed distinct from "plant-operator-role" and from any other
+      # release's own name.
+      - equal:
+          path: metadata.name
+          value: some-other-release-k8s-buddy-manager-role
+      - notEqual:
+          path: metadata.name
+          value: plant-operator-role
+
+  - it: the ClusterRoleBinding is release-scoped and references the release-scoped ClusterRole
+    release:
+      name: k8s-buddy-test
+      namespace: k8s-buddy-charttest
+    template: clusterrolebinding.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-test-manager-rolebinding
+      - equal:
+          path: roleRef.name
+          value: k8s-buddy-test-manager-role
+      - equal:
+          path: subjects[0].namespace
+          value: k8s-buddy-charttest
+
+  - it: the leader-election Role and RoleBinding are release-scoped
+    release:
+      name: k8s-buddy-test
+      namespace: k8s-buddy-charttest
+    template: leader-election-rbac.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-test-leader-election-role
+      - equal:
+          path: metadata.namespace
+          value: k8s-buddy-charttest
+
+  - it: rbac.create=false omits every RBAC object
+    set:
+      rbac.create: false
+    templates:
+      - clusterrole.yaml
+      - clusterrolebinding.yaml
+      - leader-election-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: the ServiceAccount name defaults to the release fullname
+    release:
+      name: k8s-buddy-test
+      namespace: k8s-buddy-charttest
+    template: serviceaccount.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: k8s-buddy-test
+      - equal:
+          path: metadata.namespace
+          value: k8s-buddy-charttest

@@ -1,0 +1,63 @@
+# values.schema.json is enforced by Helm itself before any template ever
+# renders. These tests prove it is load-bearing, not decorative: a bad
+# override must fail rendering with a schema error, not silently produce a
+# broken manifest. `failedTemplate` with `errorPattern` (helm-unittest 1.1.2)
+# matches the pre-render schema validation error Helm 4 raises -- see
+# https://github.com/helm-unittest/helm-unittest's own DOCUMENT.md for why
+# `errorPattern` (not just `errorMessage`) is the form that can match a
+# schema validation failure specifically.
+suite: values.schema.json actually rejects malformed values
+templates:
+  - deployment.yaml
+tests:
+  - it: an invalid plant.resourceProfile (not small|medium|large) is rejected
+    set:
+      plant.enabled: true
+      plant.resourceProfile: gigantic
+    asserts:
+      - failedTemplate:
+          errorPattern: "resourceProfile"
+
+  - it: an invalid plant.species (not in the CRD's own enum) is rejected
+    set:
+      plant.enabled: true
+      plant.species: dandelion
+    asserts:
+      - failedTemplate:
+          errorPattern: "species"
+
+  - it: replicaCount 0 is rejected (below schema minimum of 1)
+    set:
+      replicaCount: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "replicaCount"
+
+  - it: replicaCount 99 is rejected (above schema maximum of 5)
+    set:
+      replicaCount: 99
+    asserts:
+      - failedTemplate:
+          errorPattern: "replicaCount"
+
+  - it: an unknown top-level key is rejected (additionalProperties false catches typos)
+    set:
+      thisKeyDoesNotExist: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "thisKeyDoesNotExist|Additional property"
+
+  - it: an invalid image.pullPolicy is rejected
+    set:
+      image.pullPolicy: Sometimes
+    asserts:
+      - failedTemplate:
+          errorPattern: "pullPolicy"
+
+  - it: a syntactically valid, schema-conforming override still renders cleanly (control case)
+    set:
+      replicaCount: 2
+      plant.enabled: true
+      plant.resourceProfile: large
+    asserts:
+      - notFailedTemplate: {}

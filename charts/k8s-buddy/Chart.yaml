@@ -1,0 +1,36 @@
+apiVersion: v2
+name: k8s-buddy
+description: >-
+  K8s Buddy's plant-operator: a Kubernetes operator that reconciles the Plant
+  custom resource into a buddy-api Deployment/Service/ConfigMap/PDB/
+  ServiceAccount/NetworkPolicy/ServiceMonitor, reporting the workload's
+  aggregate health back onto Plant.status. Packages the CRD, the operator's
+  RBAC and Deployment, and an optional sample Plant.
+type: application
+
+# Chart version (this packaging) vs appVersion (the operator binary it
+# deploys) are tracked independently on purpose: a values.schema.json fix or
+# a template refactor bumps `version` alone, while `appVersion` only moves
+# when cmd/plant-operator's own behavior changes. "dev" mirrors the same
+# untagged, kustomize-overridden-at-deploy-time convention every other
+# manifest in this repo already uses (see deploy/kustomize/operator/
+# kustomization.yaml's own `images:` comment) -- there is no independently
+# versioned operator release yet for this to point at.
+version: 0.1.0
+appVersion: "dev"
+
+keywords:
+  - kubernetes
+  - operator
+  - kubebuilder
+  - custom-resource-definition
+  - controller-runtime
+  - portfolio
+
+home: https://github.com/sean-kramer/k8s-buddy
+sources:
+  - https://github.com/sean-kramer/k8s-buddy
+
+maintainers:
+  - name: Sean Kramer
+    url: https://github.com/sean-kramer

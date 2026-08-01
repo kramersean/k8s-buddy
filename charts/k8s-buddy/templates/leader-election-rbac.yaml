@@ -1,0 +1,46 @@
+{{- if and .Values.rbac.create .Values.leaderElection.enabled }}
+# Leader election permissions, scoped to a namespaced Role -- not a
+# ClusterRole -- because the Lease this operator's leader election creates
+# and contends over (LeaderElectionID "plant-operator.buddy.k8s-buddy.io",
+# per cmd/plant-operator/main.go) always lives in the operator's own
+# namespace. Mirrors config/rbac/leader_election_role.yaml exactly; only
+# coordination.k8s.io/leases is listed, because controller-runtime's leader
+# election has used Lease-based locking exclusively since well before the
+# v0.24 release this project pins.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-leader-election-role
+  namespace: {{ include "k8s-buddy.namespace" . }}
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "k8s-buddy.fullname" . }}-leader-election-rolebinding
+  namespace: {{ include "k8s-buddy.namespace" . }}
+  labels:
+    {{- include "k8s-buddy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "k8s-buddy.fullname" . }}-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "k8s-buddy.serviceAccountName" . }}
+    namespace: {{ include "k8s-buddy.namespace" . }}
+{{- end }}
