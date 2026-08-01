@@ -263,6 +263,22 @@ func (e *conflictingResourceError) Error() string {
 // markable somewhere controller-gen actually looks.
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// Admission webhook certificate bootstrap (cmd/plant-operator's own certs.go,
+// see docs/adr/0009-webhook-certificate-strategy.md) generates a self-signed
+// CA and serving certificate at every process startup and patches the CA's
+// PEM bytes into the caBundle of these two cluster-scoped objects — get and
+// update/patch only, resourceNames-pinned to exactly the two objects
+// config/webhook/manifests.yaml (deployed via deploy/kustomize/operator and
+// charts/k8s-buddy) creates, so this grant can never reach any other
+// operator's webhook configuration on the same cluster. Deliberately no
+// list/watch: Kubernetes RBAC cannot scope those two verbs by resourceNames
+// at all (a resourceNames-restricted list request is still authorized to
+// list the WHOLE collection), so the only way to keep this grant genuinely
+// narrow is to never request them — the patcher looks each object up by its
+// already-known name (a Get), never by listing the collection. This is a
+// real, reportable privilege increase over Plan 2's RBAC, scoped as tightly
+// as the API allows for these two resource kinds.
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;update;patch,resourceNames=plant-operator-mutating-webhook-configuration;plant-operator-validating-webhook-configuration
 
 // Reconcile drives a single Plant toward its desired state: fetch, validate
 // the name, apply every owned child, write status, requeue.

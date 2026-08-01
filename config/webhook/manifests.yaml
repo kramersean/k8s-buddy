@@ -1,0 +1,56 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: plant-operator-mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: plant-operator-webhook
+      namespace: k8s-buddy-system
+      path: /mutate-buddy-k8s-buddy-io-v1alpha1-plant
+      port: 443
+  failurePolicy: Ignore
+  name: mplant-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - buddy.k8s-buddy.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plants
+  sideEffects: None
+  timeoutSeconds: 5
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: plant-operator-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: plant-operator-webhook
+      namespace: k8s-buddy-system
+      path: /validate-buddy-k8s-buddy-io-v1alpha1-plant
+      port: 443
+  failurePolicy: Fail
+  name: vplant-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - buddy.k8s-buddy.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plants
+  sideEffects: None
+  timeoutSeconds: 5

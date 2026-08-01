@@ -26,6 +26,18 @@ rules:
   - create
   - patch
 - apiGroups:
+  - admissionregistration.k8s.io
+  resourceNames:
+  - plant-operator-mutating-webhook-configuration
+  - plant-operator-validating-webhook-configuration
+  resources:
+  - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - apps
   resources:
   - deployments

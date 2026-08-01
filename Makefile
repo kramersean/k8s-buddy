@@ -47,6 +47,10 @@ MANIFEST_DIRS := ./api/v1alpha1/... ./internal/controller/...
 CRD_DIR       := config/crd/bases
 RBAC_DIR      := config/rbac
 RBAC_ROLE_NAME := plant-operator-role
+# Where controller-gen's `webhook` generator writes the Mutating/Validating
+# WebhookConfiguration manifests it derives from the +kubebuilder:webhook
+# markers on api/v1alpha1/plant_webhook.go's SetupPlantWebhookWithManager.
+WEBHOOK_DIR   := config/webhook
 
 # The Helm chart: packages the operator, its RBAC, and the CRD (shipped in
 # crds/ so Helm installs it before anything that depends on it -- see
@@ -187,12 +191,13 @@ generate: $(CONTROLLER_GEN) ## Regenerate zz_generated.deepcopy.go for every +ku
 # scaffolded Makefile uses. config/rbac/role.yaml is therefore GENERATED --
 # never hand-edit it; fix the +kubebuilder:rbac markers on
 # internal/controller/plant_controller.go and re-run this target instead.
-manifests: $(CONTROLLER_GEN) ## Regenerate config/crd/bases and config/rbac/role.yaml from +kubebuilder markers
-	@mkdir -p $(CRD_DIR) $(RBAC_DIR)
-	$(CONTROLLER_GEN) crd rbac:roleName=$(RBAC_ROLE_NAME) \
+manifests: $(CONTROLLER_GEN) ## Regenerate config/crd/bases, config/rbac/role.yaml, and config/webhook/manifests.yaml from +kubebuilder markers
+	@mkdir -p $(CRD_DIR) $(RBAC_DIR) $(WEBHOOK_DIR)
+	$(CONTROLLER_GEN) crd rbac:roleName=$(RBAC_ROLE_NAME) webhook \
 		$(foreach d,$(MANIFEST_DIRS),paths="$(d)") \
 		output:crd:artifacts:config=$(CRD_DIR) \
-		output:rbac:artifacts:config=$(RBAC_DIR)
+		output:rbac:artifacts:config=$(RBAC_DIR) \
+		output:webhook:artifacts:config=$(WEBHOOK_DIR)
 
 .PHONY: test
 # The envtest controller suite (internal/controller/{suite,plant_controller,

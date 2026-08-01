@@ -22,8 +22,25 @@ type PlantSpec struct {
 	// (use the default of 3) is distinguishable from an explicit 0 — the
 	// Minimum marker below makes `replicas: 0` a rejected write rather than
 	// a silent scale-to-zero.
+	//
+	// The CEL rule below is additive, not a replacement for Minimum=1: it
+	// changes nothing about which values are accepted (Minimum=1 already
+	// rejects 0 on its own), it only attaches this project's own
+	// human-readable message to that specific rejection. Structural schema
+	// validation (both the Minimum keyword and this CEL rule) always runs
+	// before any admission webhook -- see api/v1alpha1/plant_webhook.go's
+	// own validate() comment and docs/adr/0009 -- so a plain `Minimum=1`
+	// alone would surface only the API server's generic "should be greater
+	// than or equal to 1" text, never PlantCustomValidator's own
+	// "plants need at least one leaf", for a bare `kubectl apply` of
+	// `replicas: 0`. Both messages now appear together in the rejection (the
+	// API server aggregates every failing rule into one response); Task 4's
+	// webhook re-asserts the same rule for defense in depth exactly the way
+	// it re-asserts the wateringInterval floor, for the same reason -- see
+	// that file's own comment.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:validation:XValidation:rule="self >= 1",message="plants need at least one leaf"
 	// +kubebuilder:default=3
 	Replicas *int32 `json:"replicas,omitempty"`
 
