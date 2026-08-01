@@ -374,6 +374,17 @@ all pass; report the run time (a suite over ~60s is too slow — tune the pollin
   requests/limits, liveness `/healthz` and readiness `/readyz` on `8082`.
 - Makefile: `docker-build-operator`, `kind-load-operator`, `deploy-operator`,
   `undeploy-operator`, and `install-crd` / `uninstall-crd`.
+- **Workload ServiceAccount (carried from Task 2's review).** Task 2's builders
+  omit `serviceAccountName`, while Plan 1's reference `deployment.yaml` sets it.
+  The effect is muted today because `automountServiceAccountToken: false` means no
+  token is mounted either way — but the drift is real. Close it here: add
+  `ServiceAccountFor(p) *corev1.ServiceAccount` to `internal/controller/resources.go`
+  (named after the Plant, `automountServiceAccountToken: false`), make
+  `DeploymentFor` set `ServiceAccountName` to it, and add it as a fifth owned child
+  in the reconciler and its RBAC. Extend the determinism and envtest owner-reference
+  assertions to cover it. The workload still gets zero API access — naming the
+  account explicitly is the point, so the manifest states its posture rather than
+  inheriting `default`.
 - CI: extend the existing e2e job — after the Plan 1 demo passes, install the CRD,
   deploy the operator, apply the `fernie` sample, wait for
   `status.readyReplicas == spec.replicas`, assert `kubectl get plants` shows a mood,
