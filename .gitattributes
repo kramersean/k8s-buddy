@@ -1,0 +1,9 @@
+# Normalize to LF in the repo. This project is built and run on Linux
+# containers and kind nodes; CRLF in a shell script or Dockerfile breaks them.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.tgz binary
