@@ -40,8 +40,9 @@ import (
 
 // This reconciler adds NO finalizer to a Plant, deliberately. Every child it
 // creates carries a controller owner reference back to its Plant, so
-// Kubernetes' own garbage collector removes all six of them when the Plant
-// goes away — there is nothing for a finalizer to clean up, and a finalizer
+// Kubernetes' own garbage collector removes all of them (six unconditional,
+// plus the ServiceMonitor when its CRD is present) when the Plant goes away —
+// there is nothing for a finalizer to clean up, and a finalizer
 // that cleans nothing only makes `kubectl delete plant` hang forever
 // whenever the operator is down. See
 // docs/adr/0007-no-finalizer-on-plant.md for the full reasoning and for the
@@ -232,9 +233,11 @@ func (e *conflictingResourceError) Error() string {
 // writes: the OwnerReferencesPermissionEnforcement admission plugin, when a
 // cluster enables it, requires `update` on the OWNER's finalizers subresource
 // before it will accept an owner reference carrying blockOwnerDeletion: true —
-// which controllerutil.SetControllerReference sets on all six children,
-// unconditionally. Dropping this line would make the operator work on kind
-// (the plugin is off by default) and fail on a hardened cluster.
+// which controllerutil.SetControllerReference sets unconditionally on every
+// child it is called for — the six always-created children, and the seventh,
+// ServiceMonitor, whenever its CRD is present. Dropping this line would make
+// the operator work on kind (the plugin is off by default) and fail on a
+// hardened cluster.
 // +kubebuilder:rbac:groups=buddy.k8s-buddy.io,resources=plants/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=create;get;list;watch;update;patch;delete
@@ -287,7 +290,7 @@ func (r *PlantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	// Step 1: fetch the Plant. A NotFound here means it was already deleted
 	// — not an error worth returning or logging as one. There is no
-	// deletion branch after this and no finalizer to remove: the six owned
+	// deletion branch after this and no finalizer to remove: the owned
 	// children are removed by Kubernetes' own garbage collector, walking
 	// the controller owner references reconcileChildren sets. See ADR 0007.
 	plant := &buddyv1alpha1.Plant{}
@@ -584,10 +587,11 @@ func (r *PlantReconciler) serviceMonitorCRDAvailable(log logr.Logger) bool {
 // bounding what the informers WATCH and hold in memory — without being load-
 // bearing for correctness.
 //
-// The cost is six uncached GETs per reconcile. That is deliberate: it is the
-// same six reads the ownership guard needed anyway (they are now one read
-// each, not two), and a Plant reconciles at most once per wateringInterval
-// plus on child events.
+// The cost is six uncached GETs per reconcile (seven when the ServiceMonitor
+// CRD is present, since applyChild is the same function called for it too).
+// That is deliberate: it is the same reads the ownership guard needed anyway
+// (they are now one read each, not two), and a Plant reconciles at most once
+// per wateringInterval plus on child events.
 func (r *PlantReconciler) applyChild(
 	ctx context.Context,
 	plant *buddyv1alpha1.Plant,

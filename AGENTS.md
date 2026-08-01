@@ -30,13 +30,14 @@ All Go, in a single module (`github.com/kramersean/k8s-buddy`):
    function of health inputs, isolated in `internal/mood` so it is
    unit-testable without HTTP or Kubernetes.
 2. **plant-operator** — a controller-runtime operator owning the `Plant`
-   custom resource (`buddy.k8s-buddy.io/v1alpha1`). Reconciles six owned
+   custom resource (`buddy.k8s-buddy.io/v1alpha1`). Reconciles seven owned
    children: Deployment, Service, ConfigMap, PodDisruptionBudget,
-   ServiceAccount, and NetworkPolicy. The HorizontalPodAutoscaler and
-   ServiceMonitor the original design spec also lists are **deferred to Plan
-   3**, along with `PlantSpec.chaos` — see
-   `docs/adr/0008-deferred-to-plan-3.md` for why each is blocked on a Plan 3
-   prerequisite rather than merely unfinished.
+   ServiceAccount, NetworkPolicy, and (conditionally, only when the
+   Prometheus Operator's ServiceMonitor CRD is installed) ServiceMonitor.
+   The HorizontalPodAutoscaler the original design spec also lists is
+   **permanently out of scope** (kind ships no metrics-server); `PlantSpec.chaos`
+   was dropped in Plan 2 and restored, narrower and opt-in, in Plan 3 — see
+   `docs/adr/0008-deferred-to-plan-3.md` for the full reasoning behind each.
 3. **chaos-buddy** — a controlled failure injector with deliberately narrow
    RBAC (list/delete pods matching one label selector, in one namespace, and
    nothing else). Modes: pod-kill, readiness-flap, latency, cpu-burn, oom.
@@ -89,7 +90,8 @@ make logs             # tail logs from every buddy-api pod
 # The two demos
 make demo             # A: static manifests (Plan 1 path) -- chaos + recovery via hack/demo.sh
 make demo-operator    # B: Plant CRD + operator (RECOMMENDED) -- one command, from nothing
-                      #    to a reconciled Plant with all six owned children
+                      #    to a reconciled Plant with all six unconditionally-owned children
+                      #    (a seventh, ServiceMonitor, appears too if Prometheus is installed)
 
 # Housekeeping
 make clean            # remove bin/, .build/, and coverage output
@@ -99,8 +101,10 @@ make rename-module    # rewrite the module path everywhere (MODULE=github.com/yo
 ```
 
 `make demo-operator` is the headline path and the one to reach for: it goes from
-a machine with Docker to a `Plant` whose six owned children are reconciled and
-ready, in one command. `make demo` is Plan 1's static-manifest path — still the
+a machine with Docker to a `Plant` whose six unconditionally-owned children are
+reconciled and ready, in one command (a seventh, ServiceMonitor, is added too
+whenever the Prometheus Operator's CRD is already installed). `make demo` is
+Plan 1's static-manifest path — still the
 fallback that works with nothing but `kubectl`, and still where chaos/recovery is
 proven — but it creates no `Plant` and exercises no operator.
 

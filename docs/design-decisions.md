@@ -235,15 +235,21 @@ No resources found
 ```
 
 **A note on this ADR's own accuracy, worth naming out loud:** ADR 0008,
-section 3, says `PlantSpec.chaos` "remains genuinely deferred/dropped." That
-statement is now stale — a later commit (`433f5b7`, after this ADR was
-recorded) restored a narrow `ChaosSpec{EnableEndpoints bool}` field so
-chaos-buddy's readiness-flap mode could actually be demonstrated end-to-end.
-`kubectl explain plant.spec` today shows `chaos` as a real field. The ADR was
-never updated to reflect that reversal — a candidate asked "is this ADR
-current?" should say no on this one point, and that it should have been
-superseded rather than left silently stale. See CORRECTIONS in the PR
-description for the full trace.
+section 3, originally said `PlantSpec.chaos` "remains genuinely
+deferred/dropped." That became stale the moment commit `433f5b7` restored a
+narrow `ChaosSpec{EnableEndpoints bool}` field so chaos-buddy's
+readiness-flap mode could actually be demonstrated end-to-end —
+`kubectl explain plant.spec` now shows `chaos` as a real field. Unlike the
+ServiceMonitor closure below, this one **has** been corrected: the same
+commit amended ADR 0008 in place, appending a dated, commit-referenced
+"REVERSED" subsection under the original text (which stays exactly as first
+written) rather than leaving the record silently wrong or forking a new ADR
+for a one-line status flip on an already-catalogued item. See
+[ADR 0001](adr/0001-record-architecture-decisions.md)'s amendment clause for
+why an in-place, dated addendum is the deliberate exception here, not a
+process lapse. A candidate asked "is this ADR current?" should now say yes,
+and should be able to point at the amendment itself as evidence the fix was
+made honestly rather than quietly.
 
 ---
 

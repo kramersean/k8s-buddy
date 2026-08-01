@@ -57,11 +57,13 @@ removed entirely. `Reconcile` returns immediately for a Plant carrying a
 `deletionTimestamp`, since there is nothing useful it can do for an object the
 garbage collector is already handling.
 
-All six owned children — Deployment, Service, ConfigMap, PodDisruptionBudget,
-ServiceAccount, NetworkPolicy — continue to carry a controller owner reference
-back to their Plant, set by `controllerutil.SetControllerReference`. Kubernetes'
-own garbage collector removes them when the Plant goes away. That is the
-mechanism, and it is the only mechanism.
+All seven owned children — Deployment, Service, ConfigMap, PodDisruptionBudget,
+ServiceAccount, NetworkPolicy, ServiceMonitor (the last conditional on the
+Prometheus Operator's CRD being present; added in Plan 3 Task 2, see ADR 0008) —
+continue to carry a controller owner reference back to their Plant, set by
+`controllerutil.SetControllerReference`. Kubernetes' own garbage collector
+removes them when the Plant goes away. That is the mechanism, and it is the
+only mechanism.
 
 The `plants/finalizers` RBAC rule is deliberately **retained**. It is unrelated to
 finalizers this controller writes: the `OwnerReferencesPermissionEnforcement`

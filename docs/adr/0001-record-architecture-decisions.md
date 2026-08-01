@@ -33,6 +33,32 @@ ADRs are immutable once accepted. A decision that is later reversed gets a new
 ADR that supersedes the old one; the old one is left in place, marked
 superseded, so the history of *why* is never erased.
 
+The one narrow exception: an ADR that is itself a catalog of several small,
+independently-tracked items — ADR 0008 is the case that exists today, three
+deferred-or-dropped items under one roof — may record a status change to ONE
+of those items as a dated, commit-referenced amendment appended to that
+item's own section, with the ADR's Status header updated to point at it
+("Accepted. Amended twice since: ..."), rather than forking a new ADR number
+for what is a one-line status flip on an already-recorded item. The exception
+is deliberately narrow and does not weaken the rule above:
+
+- It applies only to *amending the status* of an item already recorded in
+  that same catalog ADR — never to rewriting or deleting the original
+  reasoning, which stays exactly as first written.
+- The amendment is additive and dated: it names the commit, states plainly
+  what changed, and reads as a note appended next to the original text, not a
+  replacement of it. A reader still sees both the original "why" and the
+  later "why it changed," in one place, in order.
+- Any decision that does not already live in such a catalog, or any change
+  substantial enough to need its own Context/Decision/Consequences, still
+  gets a new, superseding ADR exactly as described above.
+
+This is a concession to project scale, stated rather than left as a silent
+inconsistency: forking a new ADR number for every status change to one line
+of a three-item deferred-items list would fragment a single coherent
+narrative across several files for no reader's benefit. A decision large
+enough to need its own reasoning still gets its own ADR.
+
 ## Consequences
 
 - Reviewers can answer "why" questions by reading `docs/adr/` instead of
