@@ -86,7 +86,11 @@ that isn't obvious from the code alone. Copy the Context / Decision /
 Consequences structure from any existing file in [`docs/adr/`](docs/adr/),
 number it sequentially, and never edit an accepted ADR's decision after the
 fact — a reversal gets a new ADR that supersedes the old one, which stays in
-place, marked superseded.
+place, marked superseded. The one narrow exception, and when it applies, is
+spelled out in [ADR 0001](docs/adr/0001-record-architecture-decisions.md)
+itself: a dated, commit-referenced status amendment to one item already
+recorded in a catalog-style ADR (ADR 0008 is the current example), never a
+rewrite of the original reasoning.
 
 ## CI
 
