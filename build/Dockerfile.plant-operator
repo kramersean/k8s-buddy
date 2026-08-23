@@ -17,7 +17,7 @@
 # machine running the build, never the target's, so a multi-arch build cross-
 # compiles instead of running the whole toolchain through QEMU. See
 # build/Dockerfile.buddy-api's own comment for the full reasoning.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 WORKDIR /src
 
