@@ -230,7 +230,7 @@ jobs:
       # a single go.mod -- a second, per-binary SBOM would be a duplicate of
       # the same source tree, not additional coverage.
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0.24.0
+        uses: anchore/sbom-action@v0.24.1
         with:
           path: .
           format: spdx-json
